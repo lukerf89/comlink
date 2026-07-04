@@ -1,0 +1,1211 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Comlink Implementation Outline</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f8f9fb;
+      --surface: #ffffff;
+      --surface-soft: #eef3f1;
+      --ink: #202423;
+      --muted: #606b68;
+      --line: #d8dedc;
+      --line-strong: #aeb8b5;
+      --navy: #17324d;
+      --teal: #0c6b67;
+      --green: #3c6b2a;
+      --amber: #8a5a00;
+      --coral: #9c3b2e;
+      --violet: #59419a;
+      --blue-soft: #dbeafe;
+      --teal-soft: #d5f2ed;
+      --green-soft: #dff0d7;
+      --amber-soft: #fff0bf;
+      --coral-soft: #ffe0d8;
+      --violet-soft: #e7ddff;
+      --paper: #fffdf7;
+      --terminal: #111715;
+      --terminal-text: #d9efe7;
+      --terminal-muted: #8db4a8;
+      --shadow: 0 18px 40px rgba(28, 42, 38, 0.1);
+      --radius: 8px;
+      --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.55;
+    }
+
+    a {
+      color: #0b5e7a;
+      text-decoration: none;
+      border-bottom: 1px solid rgba(11, 94, 122, 0.28);
+    }
+
+    a:hover {
+      border-bottom-color: currentColor;
+    }
+
+    code,
+    pre {
+      font-family: var(--mono);
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--line);
+      background: rgba(248, 249, 251, 0.94);
+      backdrop-filter: blur(12px);
+    }
+
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 12px 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 222px;
+      font-weight: 800;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: var(--terminal);
+      color: var(--terminal-text);
+      font-family: var(--mono);
+      font-size: 14px;
+    }
+
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 14px;
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .nav a {
+      color: var(--muted);
+      border-bottom: 0;
+    }
+
+    .nav a:hover {
+      color: var(--ink);
+    }
+
+    main {
+      overflow: hidden;
+    }
+
+    .band {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .band.alt {
+      background: #ffffff;
+    }
+
+    .band.tint {
+      background: var(--surface-soft);
+    }
+
+    .wrap {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 58px 0;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(320px, 0.9fr);
+      align-items: center;
+      gap: 44px;
+      padding: 56px 0 44px;
+      min-height: calc(100vh - 92px);
+    }
+
+    .kicker {
+      margin: 0 0 12px;
+      color: var(--teal);
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 780px;
+      margin-bottom: 18px;
+      color: var(--navy);
+      font-size: clamp(40px, 6vw, 72px);
+      line-height: 0.98;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin-bottom: 12px;
+      color: var(--navy);
+      font-size: 30px;
+      line-height: 1.14;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin-bottom: 8px;
+      color: var(--ink);
+      font-size: 18px;
+      line-height: 1.2;
+      letter-spacing: 0;
+    }
+
+    .lead {
+      max-width: 760px;
+      margin-bottom: 24px;
+      color: #3f4a47;
+      font-size: 19px;
+    }
+
+    .meta-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .pill,
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: #3f4a47;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .tag {
+      border-radius: 999px;
+      border-color: transparent;
+    }
+
+    .tag.blue { background: var(--blue-soft); color: #17406b; }
+    .tag.teal { background: var(--teal-soft); color: #08524f; }
+    .tag.green { background: var(--green-soft); color: #2b531d; }
+    .tag.amber { background: var(--amber-soft); color: #6b4600; }
+    .tag.coral { background: var(--coral-soft); color: #823025; }
+    .tag.violet { background: var(--violet-soft); color: #493582; }
+
+    .review-panel {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--terminal);
+      box-shadow: var(--shadow);
+      color: var(--terminal-text);
+      overflow: hidden;
+    }
+
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 14px;
+      border-bottom: 1px solid #2b3a35;
+      background: #17201d;
+      color: var(--terminal-muted);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .panel-body {
+      padding: 18px;
+    }
+
+    .cmd {
+      margin: 0 0 16px;
+      color: var(--terminal-muted);
+      font-family: var(--mono);
+      font-size: 13px;
+      white-space: normal;
+    }
+
+    .signal-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .signal {
+      min-height: 110px;
+      padding: 14px;
+      border: 1px solid #2f413b;
+      border-radius: var(--radius);
+      background: #17201d;
+    }
+
+    .signal strong {
+      display: block;
+      margin-bottom: 6px;
+      color: #f3fff9;
+      font-size: 15px;
+    }
+
+    .signal span {
+      color: #a9c8bd;
+      font-size: 13px;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(280px, 0.55fr);
+      align-items: start;
+      gap: 36px;
+      margin-bottom: 28px;
+    }
+
+    .section-head p {
+      color: var(--muted);
+    }
+
+    .callout {
+      padding: 18px 20px;
+      border-left: 4px solid var(--teal);
+      border-radius: var(--radius);
+      background: #ffffff;
+      box-shadow: var(--shadow);
+    }
+
+    .callout p:last-child {
+      margin-bottom: 0;
+    }
+
+    .decision-grid,
+    .work-grid,
+    .question-grid,
+    .risk-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      min-width: 0;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: 0 10px 24px rgba(27, 40, 37, 0.06);
+    }
+
+    .card p:last-child {
+      margin-bottom: 0;
+    }
+
+    .card ul {
+      margin: 12px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+
+    .card li + li {
+      margin-top: 6px;
+    }
+
+    .phase-table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    table {
+      width: 100%;
+      min-width: 940px;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 16px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    th {
+      background: #eef3f1;
+      color: var(--navy);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    td:first-child {
+      width: 150px;
+      color: var(--navy);
+      font-weight: 800;
+    }
+
+    .timing {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: var(--paper);
+      color: var(--amber);
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .gate {
+      color: var(--green);
+      font-weight: 800;
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 24px;
+    }
+
+    .pipe-step {
+      position: relative;
+      min-height: 112px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+    }
+
+    .pipe-step::after {
+      content: "->";
+      position: absolute;
+      top: 40px;
+      right: -16px;
+      color: var(--line-strong);
+      font-family: var(--mono);
+      font-weight: 800;
+    }
+
+    .pipe-step:last-child::after {
+      display: none;
+    }
+
+    .pipe-step b {
+      display: block;
+      margin-bottom: 6px;
+      color: var(--navy);
+    }
+
+    .pipe-step span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .swimlane {
+      display: grid;
+      grid-template-columns: 180px repeat(6, minmax(140px, 1fr));
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .lane-cell,
+    .lane-head {
+      min-height: 78px;
+      padding: 13px;
+      border-right: 1px solid var(--line);
+      border-bottom: 1px solid var(--line);
+      font-size: 13px;
+    }
+
+    .lane-head {
+      background: #eef3f1;
+      color: var(--navy);
+      font-weight: 800;
+    }
+
+    .lane-cell:nth-child(7n) {
+      border-right: 0;
+    }
+
+    .lane-cell.done { background: #f2f8ef; }
+    .lane-cell.next { background: #fff9e4; }
+    .lane-cell.later { background: #f5f2ff; }
+    .lane-cell.wait { background: #f7f8fa; color: var(--muted); }
+
+    .lane-cell strong {
+      display: block;
+      margin-bottom: 4px;
+      color: var(--ink);
+    }
+
+    .principles {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .principle {
+      min-height: 152px;
+      padding: 17px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+
+    .principle .num {
+      display: inline-grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      margin-bottom: 12px;
+      border-radius: 999px;
+      background: var(--navy);
+      color: #fff;
+      font-family: var(--mono);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .footer {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 980px) {
+      .hero,
+      .section-head {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        min-height: auto;
+        padding-top: 42px;
+      }
+
+      .decision-grid,
+      .work-grid,
+      .question-grid,
+      .risk-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .pipeline {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+
+      .pipe-step::after {
+        display: none;
+      }
+
+      .principles {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+    }
+
+    @media (max-width: 720px) {
+      .topbar-inner {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .nav {
+        justify-content: flex-start;
+      }
+
+      .wrap {
+        width: min(100% - 24px, 1180px);
+        padding: 42px 0;
+      }
+
+      h1 {
+        font-size: 42px;
+      }
+
+      h2 {
+        font-size: 25px;
+      }
+
+      .signal-grid,
+      .decision-grid,
+      .work-grid,
+      .question-grid,
+      .risk-grid,
+      .pipeline,
+      .principles {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark">cl</span>
+        <span>Comlink implementation outline</span>
+      </div>
+      <nav class="nav" aria-label="Page sections">
+        <a href="#stance">Stance</a>
+        <a href="#usecases">Use Cases</a>
+        <a href="#sequence">Sequence</a>
+        <a href="#timing">Timing</a>
+        <a href="#workstreams">Workstreams</a>
+        <a href="#questions">Decisions</a>
+      </nav>
+    </div>
+  </div>
+
+  <main>
+    <section class="band">
+      <div class="wrap hero">
+        <div>
+          <p class="kicker">Review artifact, not the full implementation plan</p>
+          <h1>Build the local work voice loop first, then capture meetings for agents.</h1>
+          <p class="lead">
+            This outline turns the July 3, 2026 product spec into a sequencing view:
+            what should come first for a work-focused, local-only CLI; when meeting
+            transcripts should enter the roadmap; where timing is most uncertain; and
+            which decisions should be settled before writing a full implementation plan.
+          </p>
+          <div class="meta-row" aria-label="Outline metadata">
+            <span class="pill">Prepared July 4, 2026</span>
+            <span class="pill">Primary user: enterprise work self</span>
+            <span class="pill">Local open-weight inference</span>
+            <span class="pill">Human and agent CLI consumers</span>
+          </div>
+        </div>
+
+        <aside class="review-panel" aria-label="Summary panel">
+          <div class="panel-head">
+            <span>outline.md</span>
+            <span>critical path</span>
+          </div>
+          <div class="panel-body">
+            <p class="cmd">$ comlink record --mode memo --copy --format json</p>
+            <div class="signal-grid">
+              <div class="signal">
+                <strong>MVP job</strong>
+                <span>Voice memos, work replies, prompts, and meetings become agent-readable local text.</span>
+              </div>
+              <div class="signal">
+                <strong>First proof</strong>
+                <span>Record a retained voice memo, copy clean text, and emit structured JSON offline.</span>
+              </div>
+              <div class="signal">
+                <strong>Main risk</strong>
+                <span>Long-form capture and system audio add more risk than short dictation.</span>
+              </div>
+              <div class="signal">
+                <strong>Best gate</strong>
+                <span>Build agent-readable output before meetings; prove mic meetings before Zoom and Teams.</span>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section id="stance" class="band alt">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <p class="kicker">Implementation stance</p>
+            <h2>Optimize for work text and meeting transcripts, not a broad transcription app.</h2>
+          </div>
+          <div class="callout">
+            <p>
+              The useful product is a local CLI that starts with retained voice memos,
+              then adds personalized work modes for coding prompts, Outlook replies,
+              Slack replies, and memos. The plan should make output agent-readable before
+              meeting capture, then prove in-person meetings before Zoom and Teams audio.
+            </p>
+          </div>
+        </div>
+
+        <div class="decision-grid">
+          <article class="card">
+            <span class="tag teal">Keep</span>
+            <h3>Terminal-first Rust CLI</h3>
+            <p>It keeps interface design minimal while making the same commands usable by a person or an agent.</p>
+          </article>
+          <article class="card">
+            <span class="tag green">Keep</span>
+            <h3>whisper.cpp first</h3>
+            <p>Early builds can require local `whisper.cpp` and FFmpeg installs, with `doctor` explaining missing dependencies.</p>
+          </article>
+          <article class="card">
+            <span class="tag blue">Keep</span>
+            <h3>Copy before paste</h3>
+            <p>Clipboard delivery fits the first work use cases and avoids over-investing in OS automation too early.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Move earlier</span>
+            <h3>Basic memo first</h3>
+            <p>Ship retained voice memos with no style guide before personalized work modes.</p>
+          </article>
+          <article class="card">
+            <span class="tag green">Move earlier</span>
+            <h3>Agent-readable output</h3>
+            <p>JSON/JSONL should include raw text, final text, segments, timestamps, mode, source metadata, and context metadata.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">Move earlier</span>
+            <h3>Meetings after agent CLI</h3>
+            <p>Ship MacBook-mic meeting transcripts after the JSON contract, then add Zoom and Teams system audio.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="usecases" class="band">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <p class="kicker">Primary use cases</p>
+            <h2>The build should support personal work text and meeting transcripts.</h2>
+          </div>
+          <p>
+            These are the acceptance-test scenarios for the first implementation plan.
+            Voice memos come first because they prove the local loop and create benchmark
+            data. Personalized work modes and meeting capture follow after the output
+            contract is stable.
+          </p>
+        </div>
+
+        <div class="decision-grid">
+          <article class="card">
+            <span class="tag amber">Mode</span>
+            <h3>Voice memos</h3>
+            <p>Save retained raw and clean transcripts with timestamps, segments, metadata, a session reference, and optional copy.</p>
+          </article>
+          <article class="card">
+            <span class="tag teal">Mode</span>
+            <h3>Coding prompts</h3>
+            <p>Use a style profile and optional local rewrite to turn rough intent into clear agentic coding prompts.</p>
+          </article>
+          <article class="card">
+            <span class="tag blue">Mode</span>
+            <h3>Email replies</h3>
+            <p>Produce Outlook-ready replies guided by local examples, without inventing facts or unsupported commitments.</p>
+          </article>
+          <article class="card">
+            <span class="tag green">Mode</span>
+            <h3>Slack replies</h3>
+            <p>Shape concise responses using a local Slack style profile supplied during setup.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Mode</span>
+            <h3>Notes and memos</h3>
+            <p>Capture rough thoughts into dated notes, memos, bullets, or summaries that can be searched or processed later.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">Mode</span>
+            <h3>Meeting transcripts</h3>
+            <p>Record in-person meetings first, then Zoom and Teams, producing raw transcript segments with timestamps.</p>
+          </article>
+          <article class="card">
+            <span class="tag violet">Consumer</span>
+            <h3>AI agents</h3>
+            <p>Expose stable machine-readable output without default action hints, so separate approved agents can do extraction.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">Constraint</span>
+            <h3>Offline-capable core</h3>
+            <p>Core functionality must be fully usable without network access. Strict offline enforcement is optional.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="sequence" class="band tint">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <p class="kicker">Critical path</p>
+            <h2>The system is only as reliable as the voice loop underneath it.</h2>
+          </div>
+          <p>
+            This is the dependency order I would protect. Each downstream feature can be
+            more ambitious only if the earlier stage is observable, testable, and easy to
+            replace without changing the whole product.
+          </p>
+        </div>
+
+        <div class="pipeline" aria-label="Critical path pipeline">
+          <div class="pipe-step">
+            <b>Capture</b>
+            <span>Mic and file input, permissions, temp WAVs, manual stop.</span>
+          </div>
+          <div class="pipe-step">
+            <b>Normalize</b>
+            <span>16 kHz mono, FFmpeg, duration checks, temp cleanup.</span>
+          </div>
+          <div class="pipe-step">
+            <b>Gate speech</b>
+            <span>VAD, silence rejection, pre-roll, max duration.</span>
+          </div>
+          <div class="pipe-step">
+            <b>Transcribe</b>
+            <span>Common ASR result schema over whisper.cpp first.</span>
+          </div>
+          <div class="pipe-step">
+            <b>Memo/style transform</b>
+            <span>Clean memo first, then style-backed prompt, Outlook, Slack, and memo modes.</span>
+          </div>
+          <div class="pipe-step">
+            <b>Output contract</b>
+            <span>Raw/final text, segments, timestamps, source/context metadata, text, JSON, JSONL.</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="timing" class="band alt">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <p class="kicker">Timing outline</p>
+            <h2>Recommended build checkpoints before the full plan.</h2>
+          </div>
+          <p>
+            Timing assumes one experienced engineer, macOS first, local binaries allowed,
+            and no custom UI beyond terminal/daemon indicators. These are planning bands,
+            not commitments.
+          </p>
+        </div>
+
+        <div class="phase-table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Checkpoint</th>
+                <th>Timing band</th>
+                <th>Primary outcome</th>
+                <th>Included work</th>
+                <th>Exit gate</th>
+                <th>Timing sensitivity</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>0. Foundation spike</td>
+                <td><span class="timing">2-4 days</span></td>
+                <td>Prove the CLI can call local ASR and return structured text.</td>
+                <td>Rust + Clap skeleton, config path, `transcribe FILE`, system `whisper.cpp`, FFmpeg assumption, `doctor` checks, stdout, JSON envelope, temp file hygiene.</td>
+                <td><span class="gate">Demo:</span> local audio file to text and JSON with no network path.</td>
+                <td>Low, because early builds can require manually installed local dependencies.</td>
+              </tr>
+              <tr>
+                <td>1. Basic voice memo loop</td>
+                <td><span class="timing">5-8 days</span></td>
+                <td>Voice memos are retained for benchmarking and daily note capture.</td>
+                <td>Mic recording, stop on Enter, 16 kHz WAV normalization, VAD/no-speech guard, ASR result schema, raw and clean text, timestamps/segments, metadata, optional copy, local dev install.</td>
+                <td><span class="gate">Demo:</span> `record --mode memo --copy --format json` saves a transcript and copies clean text.</td>
+                <td>Medium, driven by mic permissions, device quirks, VAD integration, and timestamp quality.</td>
+              </tr>
+              <tr>
+                <td>2. Personalized work modes v1</td>
+                <td><span class="timing">6-10 days</span></td>
+                <td>Work modes use local style examples supplied by an agent-friendly setup flow.</td>
+                <td>`setup style` from structured files, raw examples plus distilled profiles, `coding-prompt`, `email-reply`, `slack-reply`, and `memo` modes, optional local Ollama/llama.cpp rewrite, mode fixtures.</td>
+                <td><span class="gate">Demo:</span> terminal coding, Outlook, Slack, and memo examples use local style profiles and preserve intent.</td>
+                <td>Medium to high, driven by local rewrite quality and style-profile design.</td>
+              </tr>
+              <tr>
+                <td>3. Agent-friendly CLI v1</td>
+                <td><span class="timing">3-6 days</span></td>
+                <td>Separate AI agents can consume Comlink output reliably.</td>
+                <td>Stable JSON/JSONL schema, `--format json`, `--format jsonl`, retained transcripts, session IDs, raw/final text, segments, timestamps, mode, source metadata, context metadata, strict stderr/stdout behavior, documented exit codes.</td>
+                <td><span class="gate">Demo:</span> a script can call Comlink and parse transcripts without relying on default action-item extraction.</td>
+                <td>Low to medium, mostly schema discipline and documentation.</td>
+              </tr>
+              <tr>
+                <td>4. In-person meeting transcript v0</td>
+                <td><span class="timing">5-9 days</span></td>
+                <td>MacBook microphone meetings produce raw, timestamped transcripts.</td>
+                <td>`meet start`, `meet stop`, visible recording state, elapsed time, chunk/save progress, long-form mic capture, segment timestamps, rolling JSONL output, Markdown export, no live transcript UI.</td>
+                <td><span class="gate">Demo:</span> a 30-60 minute in-person meeting produces JSONL segments and Markdown after stop.</td>
+                <td>Medium, driven by long-recording stability, chunk stitching, timestamp quality, and benchmark retention.</td>
+              </tr>
+              <tr>
+                <td>5. Zoom and Teams audio spike</td>
+                <td><span class="timing">2-4 days</span></td>
+                <td>Decide the local system-audio path before committing the full milestone.</td>
+                <td>macOS system audio capture research, Zoom/Teams permission checks, mic vs system source labeling probe, virtual-device dependency decision, local-only diagnostics.</td>
+                <td><span class="gate">Demo:</span> a short Zoom or Teams call captures enough local audio to prove the path or name the dependency.</td>
+                <td>High, because macOS may require a documented local audio driver or virtual device.</td>
+              </tr>
+              <tr>
+                <td>6. Zoom and Teams audio v0</td>
+                <td><span class="timing">7-14 days</span></td>
+                <td>Online meetings can be captured locally without relying on built-in meeting notes.</td>
+                <td>System audio adapter from spike, mic plus system source handling, source labels, Zoom/Teams acceptance tests, permission diagnostics, timestamped transcript export, no diarization requirement.</td>
+                <td><span class="gate">Demo:</span> a Zoom or Teams call exports agent-readable transcript segments with source metadata.</td>
+                <td>High, because permissions, audio routing, and app behavior are the hardest part of this path.</td>
+              </tr>
+              <tr>
+                <td>7. Meeting context enrichment</td>
+                <td><span class="timing">4-7 days</span></td>
+                <td>Meeting transcripts carry enough metadata for a work-approved LLM to write notes.</td>
+                <td>Optional meeting title, participant roster, project tags, agenda/context file, source labels where known, context policy in output, export bundle for downstream agents.</td>
+                <td><span class="gate">Demo:</span> a transcript plus context JSON can be handed to an approved agent for structured meeting notes.</td>
+                <td>Medium, with diarization and speaker identity treated as later enhancements unless source labels are enough.</td>
+              </tr>
+              <tr>
+                <td>8. Workday surface hardening</td>
+                <td><span class="timing">5-10 days</span></td>
+                <td>Clipboard/manual paste is proven across the actual work surfaces.</td>
+                <td>Terminal for agentic coding, Outlook email, Slack, personal memos, copy behavior, formatting fixtures, local dev install docs, optional `listen`/hotkey spike.</td>
+                <td><span class="gate">Demo:</span> copied output works in terminal, Outlook, Slack, and memo capture without active paste.</td>
+                <td>Medium, because active paste can remain deferred but formatting issues will surface here.</td>
+              </tr>
+              <tr>
+                <td>9. Pro polish</td>
+                <td><span class="timing">1-3 weeks</span></td>
+                <td>Modes and meetings get smarter while preserving local and inspectable behavior.</td>
+                <td>Selected text transform mode, git-aware context, project vocabulary, optional local HTTP/MCP surface, diarization research, searchable transcript library, shareable-version retention policy.</td>
+                <td><span class="gate">Demo:</span> transcript bundles and work outputs both expose explicit allowed context.</td>
+                <td>Medium to high, depending on diarization access, archive UX scope, and distribution expectations.</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="workstreams" class="band">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <p class="kicker">Workstream sequencing</p>
+            <h2>Parallelize carefully, but do not let polish outrun the core loop.</h2>
+          </div>
+          <p>
+            The first checkpoint should stay narrow: retained voice memos. After that,
+            style-backed work modes, structured output, meeting capture, system audio,
+            and local context can proceed with fewer rewrites.
+          </p>
+        </div>
+
+        <div class="swimlane" aria-label="Implementation workstream swimlane">
+          <div class="lane-head">Workstream</div>
+          <div class="lane-head">Foundation</div>
+          <div class="lane-head">Memo loop</div>
+          <div class="lane-head">Style modes</div>
+          <div class="lane-head">Agent CLI</div>
+          <div class="lane-head">Meeting v0</div>
+          <div class="lane-head">System audio/context</div>
+
+          <div class="lane-head">Core CLI</div>
+          <div class="lane-cell done"><strong>Start</strong> Clap, command router, config path, `doctor`.</div>
+          <div class="lane-cell done"><strong>Build</strong> `record --mode memo` and local dev install.</div>
+          <div class="lane-cell next"><strong>Add</strong> style setup and mode registry.</div>
+          <div class="lane-cell next"><strong>Harden</strong> JSON/JSONL, errors, stdout/stderr.</div>
+          <div class="lane-cell next"><strong>Add</strong> `meet` commands over the same pipeline.</div>
+          <div class="lane-cell later"><strong>Add</strong> source-aware capture and daemon reuse.</div>
+
+          <div class="lane-head">Audio and ASR</div>
+          <div class="lane-cell done"><strong>Probe</strong> whisper.cpp subprocess.</div>
+          <div class="lane-cell done"><strong>Build</strong> mic capture, normalization, VAD.</div>
+          <div class="lane-cell next"><strong>Test</strong> fixture corpus and latency metrics.</div>
+          <div class="lane-cell wait"><strong>Expose</strong> timings and model metadata.</div>
+          <div class="lane-cell next"><strong>Build</strong> long mic capture, chunks, timestamps.</div>
+          <div class="lane-cell later"><strong>Spike</strong> Zoom/Teams system audio and source labels.</div>
+
+          <div class="lane-head">Text and modes</div>
+          <div class="lane-cell wait">Keep raw transcript only.</div>
+          <div class="lane-cell done"><strong>Add</strong> deterministic clean memo mode.</div>
+          <div class="lane-cell next"><strong>Add</strong> agent-provided style profiles and local rewrite.</div>
+          <div class="lane-cell next"><strong>Emit</strong> raw/final text, segments, source/context metadata.</div>
+          <div class="lane-cell next"><strong>Emit</strong> raw meeting segments without summary.</div>
+          <div class="lane-cell later"><strong>Add</strong> context bundles and local rewrite.</div>
+
+          <div class="lane-head">Privacy and data</div>
+          <div class="lane-cell done"><strong>Define</strong> offline-capable core and build-out retention.</div>
+          <div class="lane-cell next"><strong>Retain</strong> transcripts by default; limit benchmark audio.</div>
+          <div class="lane-cell next"><strong>Store</strong> raw style examples and distilled profiles.</div>
+          <div class="lane-cell wait"><strong>Record</strong> context policy in output.</div>
+          <div class="lane-cell next"><strong>Add</strong> meeting consent, retention, and export metadata.</div>
+          <div class="lane-cell later"><strong>Track</strong> source permissions and participant context.</div>
+
+          <div class="lane-head">OS integration</div>
+          <div class="lane-cell wait">Avoid early coupling.</div>
+          <div class="lane-cell done"><strong>Use</strong> clipboard copy only.</div>
+          <div class="lane-cell next"><strong>Test</strong> terminal, Outlook, Slack, and memos.</div>
+          <div class="lane-cell wait"><strong>Keep</strong> agents independent of OS automation.</div>
+          <div class="lane-cell next"><strong>Show</strong> visible meeting recording state.</div>
+          <div class="lane-cell later"><strong>Build</strong> system audio, hotkey, indicator, paste.</div>
+        </div>
+      </div>
+    </section>
+
+    <section class="band alt">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <p class="kicker">Plan-shaping principles</p>
+            <h2>Rules I would carry into the full implementation plan.</h2>
+          </div>
+          <p>
+            These are not product copy. They are engineering constraints that should keep
+            the implementation from becoming tangled as the feature surface grows.
+          </p>
+        </div>
+
+        <div class="principles">
+          <article class="principle">
+            <span class="num">1</span>
+            <h3>One pipeline, many commands</h3>
+            <p>`record`, `transcribe`, `batch`, and future `meet` should share the same normalized result schema.</p>
+          </article>
+          <article class="principle">
+            <span class="num">2</span>
+            <h3>Raw text always survives</h3>
+            <p>Every clean, rewrite, or prompt mode should preserve the raw transcript for debugging and trust.</p>
+          </article>
+          <article class="principle">
+            <span class="num">3</span>
+            <h3>Offline must work</h3>
+            <p>Strict enforcement is optional, but core recording, transcription, and output must require no network access.</p>
+          </article>
+          <article class="principle">
+            <span class="num">4</span>
+            <h3>Agents are first-class</h3>
+            <p>Every human-facing command should have stable machine-readable output and predictable exit behavior.</p>
+          </article>
+          <article class="principle">
+            <span class="num">5</span>
+            <h3>Transcript before notes</h3>
+            <p>Comlink should produce timestamped transcript bundles; approved downstream agents can create structured notes.</p>
+          </article>
+          <article class="principle">
+            <span class="num">6</span>
+            <h3>Retain while building</h3>
+            <p>Keep transcripts for benchmarking during build-out; limit raw audio to explicit benchmark settings.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="band tint">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <p class="kicker">Risk review</p>
+            <h2>Risks that most affect sequencing.</h2>
+          </div>
+          <p>
+            These are the places I would add spikes, acceptance tests, or explicit
+            deferrals in the full implementation plan.
+          </p>
+        </div>
+
+        <div class="risk-grid">
+          <article class="card">
+            <span class="tag coral">High</span>
+            <h3>Paste and hotkeys</h3>
+            <p>System-wide paste is app-specific. Keep it after copy and after the core work modes are useful.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Medium</span>
+            <h3>VAD quality</h3>
+            <p>Bad VAD harms speed and trust. It needs fixtures for silence, short utterances, noisy rooms, and long meeting chunks.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Medium</span>
+            <h3>Model packaging</h3>
+            <p>The timing changes depending on whether v1 shells out, downloads binaries, or bundles runtime assets.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">High</span>
+            <h3>Workplace privacy</h3>
+            <p>The app must work offline, avoid hidden cloud inference, and make local retention visible during build-out.</p>
+          </article>
+          <article class="card">
+            <span class="tag violet">Medium</span>
+            <h3>Style drift</h3>
+            <p>Style-personalized modes can over-polish. They should use local examples while preserving raw text and intent.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">High</span>
+            <h3>System audio capture</h3>
+            <p>Zoom and Teams transcription depends on local system audio capture, permissions, and source separation.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Medium</span>
+            <h3>Speaker context</h3>
+            <p>Knowing who spoke may require manual participant context, source labels, or later diarization. Raw timestamps come first.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="questions" class="band alt">
+      <div class="wrap">
+        <div class="section-head">
+          <div>
+            <p class="kicker">Resolved decisions</p>
+            <h2>Locked inputs for the full implementation plan.</h2>
+          </div>
+          <p>
+            These decisions came out of the review sequence and should be treated as the
+            planning baseline unless you change direction before implementation.
+          </p>
+        </div>
+
+        <div class="question-grid">
+          <article class="card">
+            <span class="tag teal">Milestone</span>
+            <h3>First demo</h3>
+            <p>`record --mode memo --copy --format json` captures from the MacBook mic, retains a transcript, copies clean text, and emits JSON.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Install</span>
+            <h3>Dependencies</h3>
+            <p>Early builds may require locally installed `whisper.cpp` and FFmpeg. `comlink doctor` should detect and explain missing pieces.</p>
+          </article>
+          <article class="card">
+            <span class="tag blue">Platform</span>
+            <h3>macOS first</h3>
+            <p>Implementation and acceptance tests are macOS-first. Linux and Windows remain architecture considerations only.</p>
+          </article>
+          <article class="card">
+            <span class="tag green">Privacy</span>
+            <h3>Offline core</h3>
+            <p>Strict offline enforcement is optional. Core recording, transcription, style, and export flows must be fully functional offline.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Retention</span>
+            <h3>Build-out transcripts</h3>
+            <p>Keep transcripts by default during build-out for benchmarking. A shareable version can later retain transcripts for a limited number of days.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">Retention</span>
+            <h3>Benchmark audio</h3>
+            <p>Audio may be retained only under an explicit benchmark/training setting with local limits and prune/audit visibility.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">Meetings</span>
+            <h3>Meeting v0 demo</h3>
+            <p>A 30-60 minute in-person meeting through the MacBook microphone exports timestamped JSONL and readable Markdown after stop.</p>
+          </article>
+          <article class="card">
+            <span class="tag amber">Meetings</span>
+            <h3>No live transcript UI</h3>
+            <p>Meeting v0 records safely and shows recording/chunk progress, but readable transcript finalization happens after stop.</p>
+          </article>
+          <article class="card">
+            <span class="tag violet">Meetings</span>
+            <h3>System audio path</h3>
+            <p>Run a Zoom/Teams spike before the full milestone. Avoid a virtual audio driver if possible, but allow a documented local dependency if required.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">Modes</span>
+            <h3>Basic before style</h3>
+            <p>Ship basic voice memos without a style guide first. Work modes include style setup because personalization is their main purpose.</p>
+          </article>
+          <article class="card">
+            <span class="tag violet">Modes</span>
+            <h3>Style setup</h3>
+            <p>Style setup is designed for an AI agent to provide structured examples. Store raw examples and distilled profiles during build-out.</p>
+          </article>
+          <article class="card">
+            <span class="tag green">Modes</span>
+            <h3>Local rewrite</h3>
+            <p>Local LLM rewrite lands early as an optional adapter for style-personalized work modes. Core transcription works without it.</p>
+          </article>
+          <article class="card">
+            <span class="tag teal">Surfaces</span>
+            <h3>First surface tests</h3>
+            <p>Test clipboard/manual paste in terminal for agentic coding, Outlook email, Slack, and personal memos.</p>
+          </article>
+          <article class="card">
+            <span class="tag blue">Packaging</span>
+            <h3>Local dev install</h3>
+            <p>Use local dev install first, such as `cargo install --path .` or `target/release`, with Homebrew/signing deferred.</p>
+          </article>
+          <article class="card">
+            <span class="tag violet">Agents</span>
+            <h3>No default hints</h3>
+            <p>Agent output includes raw/final text, segments, timestamps, mode, source metadata, and context metadata. No default action-item hints.</p>
+          </article>
+          <article class="card">
+            <span class="tag coral">Meetings</span>
+            <h3>Transcript bundles only</h3>
+            <p>Comlink produces high-quality timestamped transcript bundles plus metadata/context. Meeting-note generation happens elsewhere.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="band">
+      <div class="wrap footer">
+        <p>
+          Generated from
+          <a href="local-cli-transcription-app-spec.md">docs/research/local-cli-transcription-app-spec.md</a>
+          plus work-use context provided on July 4, 2026,
+          and intended as a review step before writing the full implementation plan.
+          Related visual spec:
+          <a href="local-cli-transcription-app-spec.html">docs/research/local-cli-transcription-app-spec.html</a>.
+        </p>
+      </div>
+    </section>
+  </main>
+</body>
+</html>
