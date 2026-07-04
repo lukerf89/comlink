@@ -1,0 +1,14 @@
+[
+  {
+    "id": "s1783193557554037000",
+    "created_at_ms": 1783193557554,
+    "mode": "memo",
+    "engine": "whisper.cpp",
+    "model": "<tmp>/mock-model.bin",
+    "duration_ms": 2080,
+    "source_path": "<repo>/tests/fixtures/audio/short.wav",
+    "has_transcript": true,
+    "has_audio": false,
+    "segment_count": 1
+  }
+]

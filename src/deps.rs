@@ -76,6 +76,23 @@ pub fn runtime_from_env(model_override: Option<PathBuf>) -> Result<RuntimeDeps, 
     })
 }
 
+pub fn runtime_from_model_path(model_path: PathBuf) -> Result<RuntimeDeps, ComlinkError> {
+    let ffmpeg = require_binary("COMLINK_FFMPEG", &["ffmpeg"], "ffmpeg")?;
+    let ffprobe = match resolve_binary("COMLINK_FFPROBE", &["ffprobe"]) {
+        DependencyState::Found(path) => Some(path),
+        _ => None,
+    };
+    let whisper_cpp = require_binary("COMLINK_WHISPER_CPP", WHISPER_CPP_CANDIDATES, "whisper.cpp")?;
+    let whisper_model = require_existing_model(model_path)?;
+
+    Ok(RuntimeDeps {
+        ffmpeg,
+        ffprobe,
+        whisper_cpp,
+        whisper_model,
+    })
+}
+
 fn require_binary(
     env_name: &'static str,
     candidates: &[&str],

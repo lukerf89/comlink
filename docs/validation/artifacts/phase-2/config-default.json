@@ -1,0 +1,22 @@
+{
+  "paths": {
+    "home_dir": "<tmp>/comlink-home",
+    "config_file": "<tmp>/comlink-home/config.json",
+    "data_dir": "<tmp>/comlink-home/data",
+    "database_file": "<tmp>/comlink-home/data/history.sqlite3",
+    "audio_dir": "<tmp>/comlink-home/data/audio"
+  },
+  "config": {
+    "history_enabled": true,
+    "retention": {
+      "metadata": true,
+      "transcripts": true,
+      "audio": false
+    },
+    "selected_model": null,
+    "models": []
+  },
+  "sources": [
+    "defaults"
+  ]
+}

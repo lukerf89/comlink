@@ -1,0 +1,14 @@
+{
+  "history_enabled": true,
+  "retention": {
+    "metadata": true,
+    "transcripts": false,
+    "audio": false
+  },
+  "config_file": "<tmp>/comlink-home/config.json",
+  "database_file": "<tmp>/comlink-home/data/history.sqlite3",
+  "selected_model": "<tmp>/mock-model.bin",
+  "selected_model_exists": true,
+  "asr": "local whisper.cpp",
+  "llm": "disabled; no cloud endpoint configured"
+}

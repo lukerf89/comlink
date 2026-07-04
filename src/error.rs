@@ -45,6 +45,24 @@ pub enum ComlinkError {
     #[error("clipboard delivery failed: {0}")]
     ClipboardFailed(String),
 
+    #[error("config home environment variable is required: {0}")]
+    ConfigHomeMissing(&'static str),
+
+    #[error("invalid config value {name}={value}")]
+    InvalidConfigValue { name: &'static str, value: String },
+
+    #[error("failed to parse config file {path}: {source}")]
+    ConfigParse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+
+    #[error("storage error: {0}")]
+    Storage(#[from] rusqlite::Error),
+
+    #[error("history session not found: {0}")]
+    HistoryNotFound(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
