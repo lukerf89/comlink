@@ -1,0 +1,11 @@
+{
+  "raw_text": "uh update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with super base .",
+  "final_text": "update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with Supabase.",
+  "mode": "coding-prompt",
+  "processing_steps": [
+    "deterministic-cleanup",
+    "vocabulary",
+    "snippets",
+    "coding-prompt-mode"
+  ]
+}

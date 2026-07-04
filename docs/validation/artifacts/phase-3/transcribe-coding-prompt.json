@@ -1,0 +1,36 @@
+{
+  "text": "update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with Supabase.",
+  "raw_text": "uh update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with super base .",
+  "final_text": "update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with Supabase.",
+  "mode": "coding-prompt",
+  "copied": false,
+  "engine": "whisper.cpp",
+  "model": "<tmp>/mock-model.bin",
+  "duration_ms": 2080,
+  "segments": [
+    {
+      "start_ms": 0,
+      "end_ms": 2080,
+      "text": "uh update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with super base ."
+    }
+  ],
+  "source": {
+    "path": "<repo>/tests/fixtures/audio/short.wav",
+    "normalized_sample_rate_hz": 16000,
+    "normalized_channels": 1
+  },
+  "processing_steps": [
+    {
+      "name": "deterministic-cleanup"
+    },
+    {
+      "name": "vocabulary"
+    },
+    {
+      "name": "snippets"
+    },
+    {
+      "name": "coding-prompt-mode"
+    }
+  ]
+}

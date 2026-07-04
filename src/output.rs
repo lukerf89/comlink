@@ -3,8 +3,9 @@ use serde::Serialize;
 
 use crate::{
     asr::{Segment, SourceMetadata, Transcript},
+    config::Config,
     error::ComlinkError,
-    text::TextMode,
+    text::{TextMode, TextRules},
 };
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -36,9 +37,20 @@ pub struct TranscriptOutput {
 }
 
 impl TranscriptOutput {
-    pub fn from_transcript(transcript: Transcript, mode: TextMode, copied: bool) -> Self {
+    pub fn from_transcript(
+        transcript: Transcript,
+        mode: TextMode,
+        copied: bool,
+        config: &Config,
+    ) -> Self {
         let raw_text = transcript.text;
-        let final_text = mode.process(&raw_text);
+        let final_text = mode.process(
+            &raw_text,
+            TextRules {
+                vocabulary: &config.vocabulary,
+                snippets: &config.snippets,
+            },
+        );
 
         Self {
             text: final_text.clone(),
@@ -51,9 +63,13 @@ impl TranscriptOutput {
             duration_ms: transcript.duration_ms,
             segments: transcript.segments,
             source: transcript.source,
-            processing_steps: vec![ProcessingStep {
-                name: mode.processing_step().to_string(),
-            }],
+            processing_steps: mode
+                .processing_steps()
+                .into_iter()
+                .map(|step| ProcessingStep {
+                    name: step.to_string(),
+                })
+                .collect(),
             history_session_id: None,
         }
     }
@@ -99,7 +115,12 @@ mod tests {
                 normalized_channels: 1,
             },
         };
-        let transcript = TranscriptOutput::from_transcript(transcript, TextMode::Memo, true);
+        let transcript = TranscriptOutput::from_transcript(
+            transcript,
+            TextMode::Memo,
+            true,
+            &Default::default(),
+        );
 
         let json = serde_json::to_value(&transcript).unwrap();
         assert_eq!(json["text"], "hello.");
@@ -112,7 +133,8 @@ mod tests {
         assert_eq!(json["duration_ms"], 500);
         assert!(json["segments"].is_array());
         assert_eq!(json["source"]["normalized_sample_rate_hz"], 16_000);
-        assert_eq!(json["processing_steps"][0]["name"], "memo-cleanup");
+        assert_eq!(json["processing_steps"][0]["name"], "deterministic-cleanup");
+        assert_eq!(json["processing_steps"][3]["name"], "memo-mode");
         assert!(json.get("history_session_id").is_none());
     }
 }

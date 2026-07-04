@@ -13,7 +13,7 @@ use crate::{
     output::{self, OutputFormat},
     record,
     storage::{self, PruneResult, StoredSession, StoredSessionSummary},
-    text::TextMode,
+    text::{self, TextMode, TextRules},
 };
 
 const DEFAULT_RECORD_DEVICE: &str = ":0";
@@ -49,6 +49,24 @@ enum Command {
     Models {
         #[command(subcommand)]
         command: ModelsCommand,
+    },
+
+    /// Inspect and apply deterministic text work modes.
+    Modes {
+        #[command(subcommand)]
+        command: ModesCommand,
+    },
+
+    /// Manage local vocabulary replacements.
+    Vocab {
+        #[command(subcommand)]
+        command: VocabCommand,
+    },
+
+    /// Manage local text snippets.
+    Snippets {
+        #[command(subcommand)]
+        command: SnippetsCommand,
     },
 
     /// Inspect local privacy posture.
@@ -173,6 +191,81 @@ enum ModelsCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ModesCommand {
+    /// List built-in deterministic modes.
+    List {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: ConfigFormat,
+    },
+
+    /// Process plain text through a mode without ASR.
+    Apply {
+        /// Text processing mode.
+        #[arg(long, value_enum)]
+        mode: TextMode,
+
+        /// Text to process.
+        #[arg(long)]
+        text: String,
+
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: ConfigFormat,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum VocabCommand {
+    /// Add or update a vocabulary replacement.
+    Add {
+        /// Dictated phrase to replace.
+        phrase: String,
+
+        /// Final written replacement.
+        replacement: String,
+    },
+
+    /// List configured vocabulary replacements.
+    List {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: ConfigFormat,
+    },
+
+    /// Remove a vocabulary replacement by phrase.
+    Remove {
+        /// Dictated phrase to remove.
+        phrase: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SnippetsCommand {
+    /// Add or update a snippet trigger.
+    Add {
+        /// Dictated phrase that expands the snippet.
+        trigger: String,
+
+        /// Snippet body. Literal \n sequences are saved as newlines.
+        body: String,
+    },
+
+    /// List configured snippets.
+    List {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: ConfigFormat,
+    },
+
+    /// Remove a snippet by trigger.
+    Remove {
+        /// Dictated trigger to remove.
+        trigger: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum PrivacyCommand {
     /// Show local retention, model, and LLM posture.
     Audit {
@@ -199,6 +292,9 @@ pub fn run() -> Result<(), ComlinkError> {
         Command::Config { command } => run_config(command),
         Command::History { command } => run_history(command),
         Command::Models { command } => run_models(command),
+        Command::Modes { command } => run_modes(command),
+        Command::Vocab { command } => run_vocab(command),
+        Command::Snippets { command } => run_snippets(command),
         Command::Privacy { command } => run_privacy(command),
         Command::Transcribe {
             file,
@@ -242,7 +338,8 @@ fn transcribe(
     };
 
     let transcript = engine.transcribe(&normalized.path, source, normalized.duration_ms)?;
-    let mut transcript = output::TranscriptOutput::from_transcript(transcript, mode, false);
+    let mut transcript =
+        output::TranscriptOutput::from_transcript(transcript, mode, false, &resolved.config);
     maybe_save_transcript(&resolved, &mut transcript, save, Some(&normalized.path))?;
     output::print_transcript(&transcript, format)
 }
@@ -289,7 +386,8 @@ fn record_memo(
     };
 
     let transcript = engine.transcribe(&captured.path, source, captured.duration_ms)?;
-    let mut transcript = output::TranscriptOutput::from_transcript(transcript, mode, copy);
+    let mut transcript =
+        output::TranscriptOutput::from_transcript(transcript, mode, copy, &resolved.config);
     let stop_to_final_ms = captured.stopped_at.elapsed().as_millis();
 
     if copy {
@@ -354,6 +452,85 @@ fn run_models(command: ModelsCommand) -> Result<(), ComlinkError> {
                     .as_deref()
                     .unwrap_or("<none>")
             );
+            Ok(())
+        }
+    }
+}
+
+fn run_modes(command: ModesCommand) -> Result<(), ComlinkError> {
+    match command {
+        ModesCommand::List { format } => print_modes(format),
+        ModesCommand::Apply { mode, text, format } => {
+            let resolved = config::load(CliConfigOverrides::default())?;
+            let final_text = mode.process(
+                &text,
+                TextRules {
+                    vocabulary: &resolved.config.vocabulary,
+                    snippets: &resolved.config.snippets,
+                },
+            );
+            let output = ProcessedTextOutput {
+                raw_text: text,
+                final_text,
+                mode,
+                processing_steps: mode
+                    .processing_steps()
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            };
+            print_processed_text(&output, format)
+        }
+    }
+}
+
+fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
+    let mut resolved = config::load(CliConfigOverrides::default())?;
+    match command {
+        VocabCommand::Add {
+            phrase,
+            replacement,
+        } => {
+            config::upsert_vocabulary(&mut resolved.config, phrase.clone(), replacement.clone());
+            config::save(&resolved.paths, &resolved.config)?;
+            println!("{phrase} -> {replacement}");
+            Ok(())
+        }
+        VocabCommand::List { format } => print_vocabulary(&resolved.config.vocabulary, format),
+        VocabCommand::Remove { phrase } => {
+            if !config::remove_vocabulary(&mut resolved.config, &phrase) {
+                return Err(ComlinkError::NotFound {
+                    kind: "vocabulary",
+                    name: phrase,
+                });
+            }
+            config::save(&resolved.paths, &resolved.config)?;
+            println!("removed vocabulary phrase");
+            Ok(())
+        }
+    }
+}
+
+fn run_snippets(command: SnippetsCommand) -> Result<(), ComlinkError> {
+    let mut resolved = config::load(CliConfigOverrides::default())?;
+    match command {
+        SnippetsCommand::Add { trigger, body } => {
+            let body = decode_cli_newlines(&body);
+            config::upsert_snippet(&mut resolved.config, trigger.clone(), body);
+            config::save(&resolved.paths, &resolved.config)?;
+            println!("saved snippet: {trigger}");
+            Ok(())
+        }
+        SnippetsCommand::List { format } => print_snippets(&resolved.config.snippets, format),
+        SnippetsCommand::Remove { trigger } => {
+            if !config::remove_snippet(&mut resolved.config, &trigger) {
+                return Err(ComlinkError::NotFound {
+                    kind: "snippet",
+                    name: trigger,
+                });
+            }
+            config::save(&resolved.paths, &resolved.config)?;
+            println!("removed snippet");
             Ok(())
         }
     }
@@ -482,6 +659,72 @@ fn print_models(
         }
     }
     Ok(())
+}
+
+fn print_modes(format: ConfigFormat) -> Result<(), ComlinkError> {
+    let modes = text::mode_registry();
+    match format {
+        ConfigFormat::Json => println!("{}", serde_json::to_string_pretty(&modes)?),
+        ConfigFormat::Text => {
+            for mode in modes {
+                println!("{}: {}", mode.name, mode.description);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_processed_text(
+    output: &ProcessedTextOutput,
+    format: ConfigFormat,
+) -> Result<(), ComlinkError> {
+    match format {
+        ConfigFormat::Json => println!("{}", serde_json::to_string_pretty(output)?),
+        ConfigFormat::Text => println!("{}", output.final_text),
+    }
+    Ok(())
+}
+
+fn print_vocabulary(
+    vocabulary: &[config::VocabularyEntry],
+    format: ConfigFormat,
+) -> Result<(), ComlinkError> {
+    match format {
+        ConfigFormat::Json => println!("{}", serde_json::to_string_pretty(vocabulary)?),
+        ConfigFormat::Text => {
+            for entry in vocabulary {
+                println!("{} -> {}", entry.phrase, entry.replacement);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_snippets(
+    snippets: &[config::SnippetEntry],
+    format: ConfigFormat,
+) -> Result<(), ComlinkError> {
+    match format {
+        ConfigFormat::Json => println!("{}", serde_json::to_string_pretty(snippets)?),
+        ConfigFormat::Text => {
+            for entry in snippets {
+                println!("{} -> {}", entry.trigger, entry.body.replace('\n', "\\n"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_cli_newlines(text: &str) -> String {
+    text.replace("\\n", "\n")
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProcessedTextOutput {
+    raw_text: String,
+    final_text: String,
+    mode: TextMode,
+    processing_steps: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

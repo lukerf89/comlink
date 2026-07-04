@@ -63,6 +63,9 @@ pub enum ComlinkError {
     #[error("history session not found: {0}")]
     HistoryNotFound(String),
 
+    #[error("{kind} not found: {name}")]
+    NotFound { kind: &'static str, name: String },
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

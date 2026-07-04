@@ -42,11 +42,25 @@ pub struct ModelEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VocabularyEntry {
+    pub phrase: String,
+    pub replacement: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SnippetEntry {
+    pub trigger: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub history_enabled: bool,
     pub retention: RetentionConfig,
     pub selected_model: Option<String>,
     pub models: Vec<ModelEntry>,
+    pub vocabulary: Vec<VocabularyEntry>,
+    pub snippets: Vec<SnippetEntry>,
 }
 
 impl Default for Config {
@@ -56,6 +70,8 @@ impl Default for Config {
             retention: RetentionConfig::default(),
             selected_model: None,
             models: Vec::new(),
+            vocabulary: Vec::new(),
+            snippets: Vec::new(),
         }
     }
 }
@@ -87,6 +103,8 @@ struct FileConfig {
     retention: Option<FileRetentionConfig>,
     selected_model: Option<String>,
     models: Option<Vec<FileModelEntry>>,
+    vocabulary: Option<Vec<VocabularyEntry>>,
+    snippets: Option<Vec<SnippetEntry>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,6 +212,53 @@ pub fn select_model(resolved: &mut ResolvedConfig, name: &str, path: PathBuf) {
     mark_selected_model(&mut resolved.config);
 }
 
+pub fn upsert_vocabulary(config: &mut Config, phrase: String, replacement: String) {
+    if let Some(existing) = config
+        .vocabulary
+        .iter_mut()
+        .find(|entry| entry.phrase.eq_ignore_ascii_case(&phrase))
+    {
+        existing.phrase = phrase;
+        existing.replacement = replacement;
+    } else {
+        config.vocabulary.push(VocabularyEntry {
+            phrase,
+            replacement,
+        });
+    }
+    sort_phrase_entries(&mut config.vocabulary, |entry| &entry.phrase);
+}
+
+pub fn remove_vocabulary(config: &mut Config, phrase: &str) -> bool {
+    let original_len = config.vocabulary.len();
+    config
+        .vocabulary
+        .retain(|entry| !entry.phrase.eq_ignore_ascii_case(phrase));
+    config.vocabulary.len() != original_len
+}
+
+pub fn upsert_snippet(config: &mut Config, trigger: String, body: String) {
+    if let Some(existing) = config
+        .snippets
+        .iter_mut()
+        .find(|entry| entry.trigger.eq_ignore_ascii_case(&trigger))
+    {
+        existing.trigger = trigger;
+        existing.body = body;
+    } else {
+        config.snippets.push(SnippetEntry { trigger, body });
+    }
+    sort_phrase_entries(&mut config.snippets, |entry| &entry.trigger);
+}
+
+pub fn remove_snippet(config: &mut Config, trigger: &str) -> bool {
+    let original_len = config.snippets.len();
+    config
+        .snippets
+        .retain(|entry| !entry.trigger.eq_ignore_ascii_case(trigger));
+    config.snippets.len() != original_len
+}
+
 fn resolve_paths() -> Result<ConfigPaths, ComlinkError> {
     let home_dir = if let Some(path) = env::var_os("COMLINK_HOME") {
         PathBuf::from(path)
@@ -260,6 +325,14 @@ fn merge_file_config(config: &mut Config, file: FileConfig) {
     }
     if let Some(value) = file.selected_model {
         config.selected_model = Some(value);
+    }
+    if let Some(value) = file.vocabulary {
+        config.vocabulary = value;
+        sort_phrase_entries(&mut config.vocabulary, |entry| &entry.phrase);
+    }
+    if let Some(value) = file.snippets {
+        config.snippets = value;
+        sort_phrase_entries(&mut config.snippets, |entry| &entry.trigger);
     }
 }
 
@@ -337,6 +410,16 @@ fn remove_runtime_models(config: &mut Config) {
     }
 }
 
+fn sort_phrase_entries<T>(entries: &mut [T], phrase: impl Fn(&T) -> &str) {
+    entries.sort_by(|a, b| {
+        phrase(b).len().cmp(&phrase(a).len()).then_with(|| {
+            phrase(a)
+                .to_ascii_lowercase()
+                .cmp(&phrase(b).to_ascii_lowercase())
+        })
+    });
+}
+
 fn bool_env(name: &'static str) -> Result<Option<bool>, ComlinkError> {
     let Some(value) = env::var_os(name) else {
         return Ok(None);
@@ -372,7 +455,9 @@ mod tests {
               "history_enabled": false,
               "retention": {"transcripts": true},
               "selected_model": "file",
-              "models": [{"name": "file", "path": "/tmp/file-model.bin"}]
+              "models": [{"name": "file", "path": "/tmp/file-model.bin"}],
+              "vocabulary": [{"phrase": "super base", "replacement": "Supabase"}],
+              "snippets": [{"trigger": "my signature", "body": "Best,\nLuke"}]
             }"#,
         )
         .unwrap();
@@ -403,6 +488,8 @@ mod tests {
         assert!(resolved
             .sources
             .contains(&"COMLINK_WHISPER_MODEL".to_string()));
+        assert_eq!(resolved.config.vocabulary[0].replacement, "Supabase");
+        assert_eq!(resolved.config.snippets[0].body, "Best,\nLuke");
     }
 
     #[test]
@@ -451,6 +538,14 @@ mod tests {
                     selected: false,
                 },
             ],
+            vocabulary: vec![VocabularyEntry {
+                phrase: "super base".to_string(),
+                replacement: "Supabase".to_string(),
+            }],
+            snippets: vec![SnippetEntry {
+                trigger: "my signature".to_string(),
+                body: "Best,\nLuke".to_string(),
+            }],
             ..Config::default()
         };
 
@@ -458,8 +553,41 @@ mod tests {
 
         let text = fs::read_to_string(&paths.config_file).unwrap();
         assert!(text.contains("\"file\""));
+        assert!(text.contains("\"super base\""));
+        assert!(text.contains("\"my signature\""));
         assert!(!text.contains("\"env\""));
         assert!(!text.contains("\"cli\""));
+    }
+
+    #[test]
+    fn vocab_and_snippets_are_upserted_and_removed_case_insensitively() {
+        let mut config = Config::default();
+
+        upsert_vocabulary(
+            &mut config,
+            "super base".to_string(),
+            "Supabase".to_string(),
+        );
+        upsert_vocabulary(
+            &mut config,
+            "Super Base".to_string(),
+            "SUPABASE".to_string(),
+        );
+        upsert_snippet(&mut config, "my signature".to_string(), "Best".to_string());
+        upsert_snippet(
+            &mut config,
+            "My Signature".to_string(),
+            "Regards".to_string(),
+        );
+
+        assert_eq!(config.vocabulary.len(), 1);
+        assert_eq!(config.vocabulary[0].replacement, "SUPABASE");
+        assert_eq!(config.snippets.len(), 1);
+        assert_eq!(config.snippets[0].body, "Regards");
+        assert!(remove_vocabulary(&mut config, "SUPER BASE"));
+        assert!(remove_snippet(&mut config, "MY SIGNATURE"));
+        assert!(config.vocabulary.is_empty());
+        assert!(config.snippets.is_empty());
     }
 
     #[test]

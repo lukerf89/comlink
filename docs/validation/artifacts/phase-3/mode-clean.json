@@ -1,0 +1,10 @@
+{
+  "raw_text": "um please send this to super base . my signature",
+  "final_text": "please send this to Supabase. Best, Luke",
+  "mode": "clean",
+  "processing_steps": [
+    "deterministic-cleanup",
+    "vocabulary",
+    "snippets"
+  ]
+}
