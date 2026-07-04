@@ -1,0 +1,27 @@
+{
+  "text": "Comlink phase one memo.",
+  "raw_text": "Comlink phase one memo .",
+  "final_text": "Comlink phase one memo.",
+  "mode": "memo",
+  "copied": false,
+  "engine": "whisper.cpp",
+  "model": "<tmp>/mock-model.bin",
+  "duration_ms": 2080,
+  "segments": [
+    {
+      "start_ms": 0,
+      "end_ms": 2080,
+      "text": "Comlink phase one memo ."
+    }
+  ],
+  "source": {
+    "path": "<repo>/tests/fixtures/audio/short.wav",
+    "normalized_sample_rate_hz": 16000,
+    "normalized_channels": 1
+  },
+  "processing_steps": [
+    {
+      "name": "memo-cleanup"
+    }
+  ]
+}
