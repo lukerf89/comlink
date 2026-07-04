@@ -31,6 +31,8 @@ pub struct TranscriptOutput {
     pub segments: Vec<Segment>,
     pub source: SourceMetadata,
     pub processing_steps: Vec<ProcessingStep>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_session_id: Option<String>,
 }
 
 impl TranscriptOutput {
@@ -52,6 +54,7 @@ impl TranscriptOutput {
             processing_steps: vec![ProcessingStep {
                 name: mode.processing_step().to_string(),
             }],
+            history_session_id: None,
         }
     }
 }
@@ -110,5 +113,6 @@ mod tests {
         assert!(json["segments"].is_array());
         assert_eq!(json["source"]["normalized_sample_rate_hz"], 16_000);
         assert_eq!(json["processing_steps"][0]["name"], "memo-cleanup");
+        assert!(json.get("history_session_id").is_none());
     }
 }
