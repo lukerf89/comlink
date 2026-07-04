@@ -9,6 +9,20 @@ Primary source documents:
 - `docs/research/local-cli-transcription-app-spec.md`
 - `docs/research/comlink-implementation-outline.html`
 
+## Implementation Status
+
+Updated: 2026-07-04
+
+| Phase | Status | Validation artifact |
+| --- | --- | --- |
+| 0 | Complete | `docs/validation/phase-0.md` |
+| 1 | Complete | `docs/validation/phase-1.md` |
+| 2 | Complete | `docs/validation/phase-2.md` |
+| 3 | Complete | `docs/validation/phase-3.md` |
+| 4 | Next phase | Not started |
+
+Resume work at Phase 4: Stable Agent-Friendly Output Contract.
+
 ## Planning Baseline
 
 Comlink is a macOS-first, local-first CLI for turning speech and audio files into useful work text. The first durable product loop is:
@@ -724,4 +738,3 @@ Use this prompt to start Phase 0:
 ```text
 Implement Phase 0 from docs/comlink-agent-implementation-plan.md. Keep the scope limited to repo scaffold, Rust CLI, doctor, file transcription through a local whisper.cpp subprocess, FFmpeg normalization, minimal text/JSON output, tests, and docs/validation/phase-0.md. Run the phase validation and E2E checks, recursively fix failures, then stop at the manual testing gate.
 ```
-
