@@ -63,11 +63,18 @@ pub fn record_until_enter(options: RecordingOptions<'_>) -> Result<CapturedAudio
 
     if !output.status.success() || !wav_path.exists() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(ComlinkError::AudioCaptureFailed(if stderr.is_empty() {
-            "ffmpeg recorder exited without producing audio".to_string()
-        } else {
-            stderr
-        }));
+        if !stderr.is_empty() {
+            return Err(ComlinkError::AudioCaptureFailed(stderr));
+        }
+
+        return Ok(CapturedAudio {
+            path: wav_path,
+            duration_ms: 0,
+            sample_rate_hz: 16_000,
+            channels: 1,
+            stopped_at,
+            _tempdir: tempdir,
+        });
     }
 
     let duration_ms = audio::probe_duration_ms(&wav_path, options.ffprobe).unwrap_or(0);

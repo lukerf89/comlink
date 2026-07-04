@@ -69,7 +69,9 @@ case " $* " in
     ;;
 esac
 
-if [ "${COMLINK_MOCK_SHORT_AUDIO:-0}" = "1" ]; then
+if [ "${COMLINK_MOCK_NO_AUDIO_FILE:-0}" = "1" ]; then
+  exit 255
+elif [ "${COMLINK_MOCK_SHORT_AUDIO:-0}" = "1" ]; then
   : > "$out"
 else
   cp "$COMLINK_MOCK_FIXTURE" "$out"
@@ -209,6 +211,26 @@ if [ "$no_speech_status" -ne 4 ]; then
 fi
 
 grep -q "recording too short or no speech detected" "$artifact_dir/no-speech.err"
+
+set +e
+printf '\n' | \
+COMLINK_FFMPEG="$mock_ffmpeg" \
+COMLINK_MOCK_FIXTURE="$fixture" \
+COMLINK_MOCK_NO_AUDIO_FILE=1 \
+COMLINK_WHISPER_CPP="$mock_whisper" \
+COMLINK_WHISPER_MODEL="$mock_model" \
+cargo run --quiet -- record --format json --min-duration-ms 300 \
+  > "$artifact_dir/no-audio-file.out" \
+  2> "$artifact_dir/no-audio-file.err"
+no_audio_file_status=$?
+set -e
+
+if [ "$no_audio_file_status" -ne 4 ]; then
+  echo "expected missing recorder output to be treated as no-speech exit code 4, got $no_audio_file_status" >&2
+  exit 1
+fi
+
+grep -q "recording too short or no speech detected" "$artifact_dir/no-audio-file.err"
 
 set +e
 printf '\n' | \

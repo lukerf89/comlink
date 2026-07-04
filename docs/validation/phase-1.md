@@ -40,6 +40,8 @@ Results:
 - `cargo run --quiet -- record --help` passed and documents `--format`, `--mode`, `--copy`, `--model`, `--min-duration-ms`, and `--device`.
 - `cargo run -- doctor` passed with FFmpeg, FFprobe, whisper.cpp, and the local tiny model.
 - Real file transcription with `--mode memo --format json` passed and emitted `raw_text`, `final_text`, `mode`, `copied`, `segments`, `source`, and `processing_steps`.
+- Real microphone recording with `record --mode memo --format json` passed manually: it captured `8992 ms` of microphone audio, emitted the Phase 1 JSON contract, and reported `388 ms` stop-to-final latency.
+- Real microphone recording with `record --mode memo --copy --format text` passed manually: it copied final text to the clipboard and reported `431 ms` stop-to-final latency.
 - The first real whisper run exposed a Metal allocation failure; the adapter now retries once with `-ng` for GPU/Metal-related failures, and the real validation command passes.
 - `scripts/e2e/phase-1-record-memo.sh` passed.
 
@@ -54,7 +56,7 @@ Ran `scripts/e2e/phase-1-record-memo.sh`. It:
 - Verifies the clipboard mock receives the final text.
 - Verifies terminal recording feedback, copy success feedback, and stop-to-final latency logging.
 - Verifies `record` invokes FFmpeg once on the hot path.
-- Simulates too-short/no-speech audio and asserts exit code `4`.
+- Simulates too-short/no-speech audio, including missing recorder output, and asserts exit code `4`.
 - Simulates early recorder failure and verifies ffmpeg stderr is surfaced instead of a broken-pipe message.
 - Writes artifacts under `docs/validation/artifacts/phase-1/`.
 
@@ -62,8 +64,9 @@ Observed mocked stop-to-final latency: `47 ms`.
 
 ## Known Gaps
 
-- Real microphone capture was not run inside the agent session because macOS microphone permission and a spoken phrase require the manual pause gate.
+- Real microphone capture was validated manually by the user on macOS. The agent still cannot run that gate unattended because microphone permission and spoken input require user interaction.
 - Phase 1 uses FFmpeg AVFoundation capture instead of a Rust `cpal` capture adapter. This keeps the implementation dependency-free and macOS-first, but device selection may need hardening.
+- The live `ggml-tiny.en.bin` run mis-transcribed "Supabase" as "Superbase" and joined "memo test" as "MemoTest"; follow-up work should evaluate larger models and/or dictionary replacements for product names.
 - The no-speech guard is duration/empty-transcript based. True VAD remains deferred.
 - No transcript history is persisted yet; Phase 2 owns config, storage, history, and retention toggles.
 - `record` defaults to AVFoundation device `:0`; use `--device` or `COMLINK_RECORD_DEVICE` if the default mic index differs.
