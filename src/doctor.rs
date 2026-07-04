@@ -23,7 +23,7 @@ fn print_report(report: &DependencyReport) {
     print_state(
         "whisper.cpp",
         &report.whisper_cpp,
-        "set COMLINK_WHISPER_CPP to whisper-cli/main or install whisper.cpp",
+        "set COMLINK_WHISPER_CPP to whisper-cli or install whisper.cpp",
     );
     print_state(
         "whisper model",
@@ -36,6 +36,9 @@ fn print_state(label: &str, state: &DependencyState, help: &str) {
     match state {
         DependencyState::Found(path) => eprintln!("  [ok]   {label}: {}", path.display()),
         DependencyState::Missing => eprintln!("  [miss] {label}: {help}"),
+        DependencyState::NotFound(path) => {
+            eprintln!("  [miss] {label}: {} ({help})", path.display())
+        }
         DependencyState::NotExecutable(path) => {
             eprintln!("  [bad]  {label}: {} ({help})", path.display())
         }

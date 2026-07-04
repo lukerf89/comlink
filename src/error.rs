@@ -10,6 +10,9 @@ pub enum ComlinkError {
     #[error("dependency not found: {0}")]
     DependencyMissing(&'static str),
 
+    #[error("dependency path does not exist: {name}={path}")]
+    DependencyPathMissing { name: &'static str, path: PathBuf },
+
     #[error("dependency path is not executable: {name}={path}")]
     DependencyNotExecutable { name: &'static str, path: PathBuf },
 

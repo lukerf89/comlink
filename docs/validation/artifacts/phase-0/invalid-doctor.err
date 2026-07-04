@@ -1,7 +1,7 @@
 Comlink doctor
   offline core: enabled
-  [ok]   ffmpeg: /opt/homebrew/bin/ffmpeg
-  [ok]   ffprobe: /opt/homebrew/bin/ffprobe
-  [bad]  whisper.cpp: <tmp>/not-a-binary (set COMLINK_WHISPER_CPP to whisper-cli/main or install whisper.cpp)
+  [ok]   ffmpeg: <ffmpeg-path>
+  [ok]   ffprobe: <ffprobe-path>
+  [miss] whisper.cpp: <tmp>/not-a-binary (set COMLINK_WHISPER_CPP to whisper-cli or install whisper.cpp)
   [ok]   whisper model: <tmp>/mock-model.bin
 error: dependency not found: one or more required dependencies

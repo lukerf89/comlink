@@ -43,14 +43,14 @@ Results:
 - `ffmpeg` found at `/opt/homebrew/bin/ffmpeg`.
 - `ffprobe` found at `/opt/homebrew/bin/ffprobe`.
 - `whisper-cli` found at `/opt/homebrew/bin/whisper-cli`.
-- Real model installed at `/Users/lukefreeman/Library/Caches/comlink/models/ggml-tiny.en.bin`.
+- Real model installed at `$HOME/Library/Caches/comlink/models/ggml-tiny.en.bin`.
 - Model SHA-256: `921e4cf8686fdd993dcd081a5da5b6c365bfde1162e72b08d75ac75289920b1f`.
 - `tests/fixtures/audio/short.wav` generated successfully.
 - Fixture metadata: `pcm_s16le`, 16 kHz, mono, 2.08 seconds.
 - Phase 0 shell scripts passed `bash -n`.
 - `cargo fmt --check` passed.
 - `cargo clippy --all-targets -- -D warnings` passed.
-- `cargo test --all` passed: 3 tests.
+- `cargo test --all` passed: 6 tests.
 - `cargo run -- doctor` passed with the real model path.
 - `scripts/e2e/phase-0-file-transcribe.sh` passed.
 - Real text transcription of `tests/fixtures/audio/short.wav` returned `Comlink Phase 0 fixture.`

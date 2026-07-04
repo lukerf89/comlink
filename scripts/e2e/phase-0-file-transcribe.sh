@@ -5,18 +5,28 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fixture="$repo_root/tests/fixtures/audio/short.wav"
 artifact_dir="$repo_root/docs/validation/artifacts/phase-0"
 tmp_dir="$(mktemp -d)"
+ffmpeg_path="$(command -v ffmpeg || true)"
+ffprobe_path="$(command -v ffprobe || true)"
 
 cleanup() {
-  python3 - "$tmp_dir" "$artifact_dir" <<'PY' || true
+  python3 - "$tmp_dir" "$repo_root" "$ffmpeg_path" "$ffprobe_path" "$artifact_dir" <<'PY' || true
 import pathlib
 import sys
 
 tmp_dir = sys.argv[1]
-artifact_dir = pathlib.Path(sys.argv[2])
+repo_root = sys.argv[2]
+ffmpeg_path = sys.argv[3]
+ffprobe_path = sys.argv[4]
+artifact_dir = pathlib.Path(sys.argv[5])
 for path in artifact_dir.glob("*"):
     if path.is_file():
         text = path.read_text(errors="ignore")
-        path.write_text(text.replace(tmp_dir, "<tmp>"))
+        text = text.replace(tmp_dir, "<tmp>").replace(repo_root, "<repo>")
+        if ffmpeg_path:
+            text = text.replace(ffmpeg_path, "<ffmpeg-path>")
+        if ffprobe_path:
+            text = text.replace(ffprobe_path, "<ffprobe-path>")
+        path.write_text(text)
 PY
   rm -rf "$tmp_dir"
 }

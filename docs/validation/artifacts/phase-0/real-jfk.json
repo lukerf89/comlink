@@ -1,7 +1,7 @@
 {
   "text": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country.",
   "engine": "whisper.cpp",
-  "model": "/Users/lukefreeman/Library/Caches/comlink/models/ggml-tiny.en.bin",
+  "model": "<model-path>",
   "duration_ms": 11000,
   "segments": [
     {
@@ -11,7 +11,7 @@
     }
   ],
   "source": {
-    "path": "/opt/homebrew/share/whisper-cpp/jfk.wav",
+    "path": "<source-path>",
     "normalized_sample_rate_hz": 16000,
     "normalized_channels": 1
   }

@@ -11,7 +11,7 @@
     }
   ],
   "source": {
-    "path": "/Users/lukefreeman/code/comlink/tests/fixtures/audio/short.wav",
+    "path": "<repo>/tests/fixtures/audio/short.wav",
     "normalized_sample_rate_hz": 16000,
     "normalized_channels": 1
   }

@@ -1,7 +1,7 @@
 {
   "text": "Comlink Phase 0 fixture.",
   "engine": "whisper.cpp",
-  "model": "/Users/lukefreeman/Library/Caches/comlink/models/ggml-tiny.en.bin",
+  "model": "<model-path>",
   "duration_ms": 2080,
   "segments": [
     {
