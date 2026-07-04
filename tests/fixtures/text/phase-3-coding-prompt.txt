@@ -1,0 +1,1 @@
+uh update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with super base .

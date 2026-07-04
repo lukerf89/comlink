@@ -100,7 +100,7 @@ pub fn save_transcript(
         params![
             session_id,
             created_at_ms,
-            format!("{:?}", transcript.mode).to_ascii_lowercase(),
+            transcript.mode.as_str(),
             transcript.engine,
             transcript.model,
             transcript.duration_ms as i64,

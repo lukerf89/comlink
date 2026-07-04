@@ -1,0 +1,32 @@
+[
+  {
+    "name": "raw",
+    "description": "Trim only; preserve dictated wording.",
+    "deterministic": true
+  },
+  {
+    "name": "clean",
+    "description": "Remove safe fillers, normalize whitespace, and apply local rules.",
+    "deterministic": true
+  },
+  {
+    "name": "memo",
+    "description": "Clean work notes without rewriting meaning.",
+    "deterministic": true
+  },
+  {
+    "name": "coding-prompt",
+    "description": "Clean technical dictation while preserving commands and code-ish tokens.",
+    "deterministic": true
+  },
+  {
+    "name": "email-reply",
+    "description": "Clean an email reply while keeping the user's wording.",
+    "deterministic": true
+  },
+  {
+    "name": "slack-reply",
+    "description": "Clean a concise chat reply while keeping the user's wording.",
+    "deterministic": true
+  }
+]
