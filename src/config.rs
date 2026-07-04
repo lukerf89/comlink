@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ComlinkError;
 
+const RUNTIME_MODEL_NAMES: [&str; 2] = ["env", "cli"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum ConfigFormat {
@@ -127,6 +129,7 @@ pub fn save(paths: &ConfigPaths, config: &Config) -> Result<(), ComlinkError> {
         fs::create_dir_all(parent)?;
     }
     let mut to_write = config.clone();
+    remove_runtime_models(&mut to_write);
     mark_selected_model(&mut to_write);
     let bytes = serde_json::to_vec_pretty(&to_write)?;
     fs::write(&paths.config_file, bytes)?;
@@ -170,7 +173,6 @@ pub fn selected_model_path(config: &Config) -> Option<PathBuf> {
         .iter()
         .find(|entry| entry.name == selected)
         .map(|entry| entry.path.clone())
-        .or_else(|| Some(PathBuf::from(selected)))
 }
 
 pub fn select_model(resolved: &mut ResolvedConfig, name: &str, path: PathBuf) {
@@ -322,6 +324,19 @@ fn mark_selected_model(config: &mut Config) {
     }
 }
 
+fn remove_runtime_models(config: &mut Config) {
+    config
+        .models
+        .retain(|entry| !RUNTIME_MODEL_NAMES.contains(&entry.name.as_str()));
+    if config
+        .selected_model
+        .as_deref()
+        .is_some_and(|name| RUNTIME_MODEL_NAMES.contains(&name))
+    {
+        config.selected_model = None;
+    }
+}
+
 fn bool_env(name: &'static str) -> Result<Option<bool>, ComlinkError> {
     let Some(value) = env::var_os(name) else {
         return Ok(None);
@@ -405,6 +420,57 @@ mod tests {
         restore_env("COMLINK_RETAIN_AUDIO", previous);
 
         assert!(error.to_string().contains("COMLINK_RETAIN_AUDIO"));
+    }
+
+    #[test]
+    fn save_omits_runtime_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            home_dir: dir.path().to_path_buf(),
+            config_file: dir.path().join("config.json"),
+            data_dir: dir.path().join("data"),
+            database_file: dir.path().join("data/history.sqlite3"),
+            audio_dir: dir.path().join("data/audio"),
+        };
+        let config = Config {
+            selected_model: Some("file".to_string()),
+            models: vec![
+                ModelEntry {
+                    name: "file".to_string(),
+                    path: PathBuf::from("/tmp/file-model.bin"),
+                    selected: false,
+                },
+                ModelEntry {
+                    name: "env".to_string(),
+                    path: PathBuf::from("/tmp/env-model.bin"),
+                    selected: true,
+                },
+                ModelEntry {
+                    name: "cli".to_string(),
+                    path: PathBuf::from("/tmp/cli-model.bin"),
+                    selected: false,
+                },
+            ],
+            ..Config::default()
+        };
+
+        save(&paths, &config).unwrap();
+
+        let text = fs::read_to_string(&paths.config_file).unwrap();
+        assert!(text.contains("\"file\""));
+        assert!(!text.contains("\"env\""));
+        assert!(!text.contains("\"cli\""));
+    }
+
+    #[test]
+    fn selected_model_path_is_none_when_registry_entry_is_missing() {
+        let config = Config {
+            selected_model: Some("missing".to_string()),
+            models: Vec::new(),
+            ..Config::default()
+        };
+
+        assert_eq!(selected_model_path(&config), None);
     }
 
     fn restore_env(name: &str, previous: Option<std::ffi::OsString>) {

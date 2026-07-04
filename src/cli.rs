@@ -343,6 +343,7 @@ fn run_models(command: ModelsCommand) -> Result<(), ComlinkError> {
             if !path.is_file() {
                 return Err(ComlinkError::ModelPathMissing(path));
             }
+            let path = path.canonicalize()?;
             config::select_model(&mut resolved, &name, path);
             config::save(&resolved.paths, &resolved.config)?;
             println!(
@@ -458,8 +459,8 @@ fn print_prune_result(result: &PruneResult, format: ConfigFormat) -> Result<(), 
     match format {
         ConfigFormat::Json => println!("{}", serde_json::to_string_pretty(result)?),
         ConfigFormat::Text => println!(
-            "deleted sessions={}, segments={}",
-            result.sessions_deleted, result.segments_deleted
+            "deleted sessions={}, segments={}, audio_files={}",
+            result.sessions_deleted, result.segments_deleted, result.audio_files_deleted
         ),
     }
     Ok(())

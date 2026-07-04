@@ -1,6 +1,8 @@
 use std::{
-    fs,
-    path::Path,
+    fs, io,
+    path::{Path, PathBuf},
+    process,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -8,11 +10,13 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::{
-    asr::{Segment, SourceMetadata},
+    asr::SourceMetadata,
     config::{ConfigPaths, RetentionConfig},
     error::ComlinkError,
     output::TranscriptOutput,
 };
+
+static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StoredSession {
@@ -54,6 +58,7 @@ pub struct StoredSegment {
 pub struct PruneResult {
     pub sessions_deleted: u64,
     pub segments_deleted: u64,
+    pub audio_files_deleted: u64,
 }
 
 pub fn save_transcript(
@@ -212,12 +217,22 @@ pub fn show(paths: &ConfigPaths, id: &str) -> Result<StoredSession, ComlinkError
 }
 
 pub fn prune_all(paths: &ConfigPaths) -> Result<PruneResult, ComlinkError> {
-    let connection = open(paths)?;
-    let segments_deleted = connection.execute("DELETE FROM segments", [])? as u64;
-    let sessions_deleted = connection.execute("DELETE FROM sessions", [])? as u64;
+    let mut connection = open(paths)?;
+    let transaction = connection.transaction()?;
+    let audio_paths = {
+        let mut statement =
+            transaction.prepare("SELECT audio_path FROM sessions WHERE audio_path IS NOT NULL")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    let audio_files_deleted = delete_audio_files(&audio_paths)?;
+    let segments_deleted = transaction.execute("DELETE FROM segments", [])? as u64;
+    let sessions_deleted = transaction.execute("DELETE FROM sessions", [])? as u64;
+    transaction.commit()?;
     Ok(PruneResult {
         sessions_deleted,
         segments_deleted,
+        audio_files_deleted,
     })
 }
 
@@ -226,6 +241,7 @@ fn open(paths: &ConfigPaths) -> Result<Connection, ComlinkError> {
         fs::create_dir_all(parent)?;
     }
     let connection = Connection::open(&paths.database_file)?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
     migrate(&connection)?;
     Ok(connection)
 }
@@ -286,12 +302,25 @@ fn retained_audio_path(
     Ok(Some(retained.display().to_string()))
 }
 
+fn delete_audio_files(audio_paths: &[String]) -> Result<u64, ComlinkError> {
+    let mut deleted = 0;
+    for audio_path in audio_paths {
+        match fs::remove_file(PathBuf::from(audio_path)) {
+            Ok(()) => deleted += 1,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(deleted)
+}
+
 fn new_session_id() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    format!("s{nanos}")
+    let sequence = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("s{nanos}-{}-{sequence}", process::id())
 }
 
 fn now_ms() -> i64 {
@@ -301,15 +330,10 @@ fn now_ms() -> i64 {
         .unwrap_or_default()
 }
 
-#[allow(dead_code)]
-fn _assert_segment_serializable(segment: &Segment) -> &Segment {
-    segment
-}
-
 #[cfg(test)]
 mod tests {
     use crate::{
-        asr::SourceMetadata,
+        asr::{Segment, SourceMetadata},
         output::{ProcessingStep, TranscriptOutput},
         text::TextMode,
     };
@@ -366,5 +390,43 @@ mod tests {
         assert_eq!(session.raw_text, None);
         assert_eq!(session.final_text, None);
         assert_eq!(session.segments[0].text, None);
+    }
+
+    #[test]
+    fn prune_all_removes_retained_audio_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            home_dir: dir.path().to_path_buf(),
+            config_file: dir.path().join("config.json"),
+            data_dir: dir.path().join("data"),
+            database_file: dir.path().join("data/history.sqlite3"),
+            audio_dir: dir.path().join("data/audio"),
+        };
+        let retention = RetentionConfig {
+            metadata: true,
+            transcripts: true,
+            audio: true,
+        };
+        let source_audio = dir.path().join("normalized.wav");
+        fs::write(&source_audio, b"audio").unwrap();
+
+        let id = save_transcript(
+            &paths,
+            &retention,
+            &sample_transcript(),
+            Some(&source_audio),
+        )
+        .unwrap();
+        let session = show(&paths, &id).unwrap();
+        let retained_audio = session.audio_path.unwrap();
+        assert!(Path::new(&retained_audio).is_file());
+
+        let result = prune_all(&paths).unwrap();
+
+        assert_eq!(result.sessions_deleted, 1);
+        assert_eq!(result.segments_deleted, 1);
+        assert_eq!(result.audio_files_deleted, 1);
+        assert!(!Path::new(&retained_audio).exists());
+        assert!(list(&paths).unwrap().is_empty());
     }
 }
