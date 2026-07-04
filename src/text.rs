@@ -43,9 +43,9 @@ impl TextMode {
         match self {
             Self::Raw => raw_text.trim().to_string(),
             Self::Clean => apply_deterministic_rules(raw_text, rules),
-            Self::Memo => apply_memo_mode(raw_text, rules),
-            Self::CodingPrompt => apply_coding_prompt_mode(raw_text, rules),
-            Self::EmailReply => apply_email_reply_mode(raw_text, rules),
+            Self::Memo | Self::CodingPrompt | Self::EmailReply => {
+                apply_sentence_end_mode(raw_text, rules)
+            }
             Self::SlackReply => apply_slack_reply_mode(raw_text, rules),
         }
     }
@@ -101,7 +101,8 @@ pub fn mode_registry() -> Vec<ModeDefinition> {
         },
         ModeDefinition {
             name: TextMode::CodingPrompt.as_str(),
-            description: "Clean technical dictation while preserving commands and code-ish tokens.",
+            description:
+                "Clean technical dictation and add sentence-ending punctuation when needed.",
             deterministic: true,
         },
         ModeDefinition {
@@ -117,15 +118,7 @@ pub fn mode_registry() -> Vec<ModeDefinition> {
     ]
 }
 
-fn apply_memo_mode(raw_text: &str, rules: TextRules<'_>) -> String {
-    ensure_sentence_end(&apply_deterministic_rules(raw_text, rules))
-}
-
-fn apply_coding_prompt_mode(raw_text: &str, rules: TextRules<'_>) -> String {
-    ensure_sentence_end(&apply_deterministic_rules(raw_text, rules))
-}
-
-fn apply_email_reply_mode(raw_text: &str, rules: TextRules<'_>) -> String {
+fn apply_sentence_end_mode(raw_text: &str, rules: TextRules<'_>) -> String {
     ensure_sentence_end(&apply_deterministic_rules(raw_text, rules))
 }
 
