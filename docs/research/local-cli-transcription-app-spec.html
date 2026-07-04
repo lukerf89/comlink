@@ -1207,7 +1207,7 @@
                 <li>Mic plus system audio is more useful than one stream</li>
                 <li>Notes and transcripts persist even when audio does not</li>
               </ul>
-              <p>Lesson: meeting mode should be a later dedicated pipeline.</p>
+              <p>Lesson: meeting mode should arrive early, but as its own explicit pipeline.</p>
             </article>
 
             <article class="card product-pattern">
@@ -1280,7 +1280,7 @@
                   <td><span class="yes">Yes</span></td>
                   <td><span class="yes">Primary</span></td>
                   <td><span class="mixed">Some</span></td>
-                  <td><span class="later">Phase 4</span></td>
+                  <td><span class="later">Phase 2 v0</span></td>
                 </tr>
                 <tr>
                   <td>Developer-oriented command and prompt dictation</td>
@@ -1665,27 +1665,30 @@
                 <li>Model management</li>
                 <li>FFmpeg and Silero VAD</li>
                 <li>Clean mode, vocab, snippets</li>
+                <li>Terminal/coding mode</li>
                 <li>Clipboard and SQLite</li>
               </ul>
             </article>
             <article class="phase">
               <span class="phase-num">Phase 2</span>
-              <h3>Dictation daemon</h3>
+              <h3>Daemon and meeting v0</h3>
               <ul>
                 <li>Global hotkey</li>
                 <li>Recording indicator</li>
                 <li>Copy/paste adapter</li>
-                <li>App-specific mode rules</li>
+                <li>Meeting start/stop</li>
+                <li>Markdown/JSON transcript export</li>
               </ul>
             </article>
             <article class="phase">
               <span class="phase-num">Phase 3</span>
-              <h3>Developer mode</h3>
+              <h3>Developer and meeting polish</h3>
               <ul>
-                <li>Prompt and terminal modes</li>
+                <li>Advanced prompt modes</li>
                 <li>Selected text transforms</li>
                 <li>MCP or local HTTP server</li>
                 <li>Git-aware context</li>
+                <li>Source labels and note markers</li>
               </ul>
             </article>
             <article class="phase">
@@ -1693,7 +1696,7 @@
               <h3>Meeting and file pro</h3>
               <ul>
                 <li>WhisperX and diarization</li>
-                <li>System audio adapters</li>
+                <li>Mature system audio adapters</li>
                 <li>Notes and action extraction</li>
                 <li>Searchable transcript library</li>
               </ul>
@@ -1721,8 +1724,8 @@
             </article>
             <article class="card">
               <span class="tag green">Retention</span>
-              <h3>Audio off by default</h3>
-              <p>Short dictation uses temp audio and deletes it. Transcript history is a visible setting or command choice.</p>
+              <h3>Metadata-only by default</h3>
+              <p>Short dictation uses temp audio and deletes it. Transcript text retention is opt-in.</p>
             </article>
             <article class="card">
               <span class="tag amber">Accuracy</span>
@@ -1740,78 +1743,56 @@
         <section id="questions">
           <div class="section-head">
             <div>
-              <div class="section-kicker">Feedback needed</div>
-              <h2>Open questions before implementation hardens</h2>
+              <div class="section-kicker">Resolved feedback</div>
+              <h2>Product decisions now baked into the roadmap</h2>
             </div>
             <p>
-              These are the decisions most likely to change architecture, packaging, or early UX.
+              These decisions came out of the review pass and should guide implementation,
+              packaging, privacy defaults, and milestone planning.
             </p>
           </div>
 
           <div class="questions">
-            <details open>
-              <summary>1. Should the MVP be terminal-first or daemon-first?</summary>
-              <div class="question-body">
-                Terminal-first gets <code>record</code>, <code>transcribe</code>, model management,
-                and scriptable output working quickly. Daemon-first validates the Wispr-like
-                value sooner, but pulls in hotkeys, permissions, indicators, and paste complexity.
-              </div>
-            </details>
-            <details open>
-              <summary>2. Which language should anchor the core?</summary>
-              <div class="question-body">
-                Rust fits a polished cross-platform daemon and native adapters. Python/Typer fits
-                a fast research spike around ASR and VAD libraries. Go is a pragmatic middle path.
-              </div>
-            </details>
-            <details>
-              <summary>3. What is the default model and install story?</summary>
-              <div class="question-body">
-                The spec points at <code>whisper.cpp</code> plus <code>small.en</code> as a strong
-                default. We still need a decision on bundled runtime, model download verification,
-                license display, and whether English-only is acceptable initially.
-              </div>
-            </details>
-            <details>
-              <summary>4. Is transcript history on or off by default?</summary>
-              <div class="question-body">
-                History makes the product useful and debuggable, but the privacy posture is cleaner
-                with retention off until explicitly enabled. A compromise is metadata-only history
-                by default, with transcript retention opt-in.
-              </div>
-            </details>
-            <details>
-              <summary>5. How much context should comlink ever read?</summary>
-              <div class="question-body">
-                CLI context such as cwd, git branch, and flags is low risk. Selected text, clipboard,
-                app name, URL, and textbox context are valuable but should be explicit, logged, and
-                controlled by mode policy.
-              </div>
-            </details>
-            <details>
-              <summary>6. Should paste be copy-first or active-app-first?</summary>
-              <div class="question-body">
-                Clipboard copy is reliable and MVP-safe. Active paste is the product magic, but it
-                needs OS-specific adapters and failure handling. The spec recommends copy first,
-                paste in daemon mode.
-              </div>
-            </details>
-            <details>
-              <summary>7. How early should terminal/coding mode ship?</summary>
-              <div class="question-body">
-                For this project, developer dictation feels like a differentiator. It may deserve
-                to move from Phase 3 into Phase 1 as a deterministic mode that preserves symbols,
-                filenames, commands, URLs, camelCase, and snake_case.
-              </div>
-            </details>
-            <details>
-              <summary>8. What platforms matter first?</summary>
-              <div class="question-body">
-                macOS is the easiest place to start for local CLI plus clipboard and eventual
-                accessibility paste. Linux and Windows change hotkey, paste, audio, and packaging
-                constraints enough that they should be explicit roadmap choices.
-              </div>
-            </details>
+            <article class="card">
+              <span class="tag mint">MVP</span>
+              <h3>Terminal-first</h3>
+              <p>Start with <code>record</code>, <code>transcribe</code>, model management, scriptable output, and copy delivery.</p>
+            </article>
+            <article class="card">
+              <span class="tag blue">Core</span>
+              <h3>Rust on macOS first</h3>
+              <p>Use Rust + Clap for the CLI foundation, with macOS as the first platform target.</p>
+            </article>
+            <article class="card">
+              <span class="tag green">ASR</span>
+              <h3>whisper.cpp + small.en</h3>
+              <p>Recommend <code>small.en</code> as the default model through explicit install and verification.</p>
+            </article>
+            <article class="card">
+              <span class="tag amber">Privacy</span>
+              <h3>Metadata-only history</h3>
+              <p>Keep session metadata by default. Transcript text and audio retention require opt-in.</p>
+            </article>
+            <article class="card">
+              <span class="tag coral">Context</span>
+              <h3>Active app included</h3>
+              <p>Allow CLI/git context plus active app name by default. Clipboard, selected text, and textbox content stay opt-in.</p>
+            </article>
+            <article class="card">
+              <span class="tag violet">Delivery</span>
+              <h3>Copy-first MVP</h3>
+              <p>Use clipboard copy first; active paste arrives later through daemon and OS adapters.</p>
+            </article>
+            <article class="card">
+              <span class="tag mint">Developer mode</span>
+              <h3>Phase 1</h3>
+              <p>Ship terminal/coding mode early so commands, symbols, filenames, URLs, camelCase, and snake_case are preserved.</p>
+            </article>
+            <article class="card">
+              <span class="tag amber">Meetings</span>
+              <h3>Phase 2 v0</h3>
+              <p>Add explicit meeting start/stop, visible recording state, mic-first capture, and Markdown/JSON transcript export.</p>
+            </article>
           </div>
         </section>
 
@@ -1845,7 +1826,7 @@
 
         <footer class="footer">
           Generated from <a href="local-cli-transcription-app-spec.md">docs/research/local-cli-transcription-app-spec.md</a>.
-          The original spec uses <code>vox</code> as a placeholder name; this artifact maps the product vision to <code>comlink</code>.
+          This artifact presents the current <code>comlink</code> product direction and roadmap decisions.
         </footer>
       </div>
     </main>

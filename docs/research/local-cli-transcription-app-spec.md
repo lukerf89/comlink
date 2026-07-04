@@ -20,15 +20,15 @@ The best local CLI version should be built as a small command-line control plane
 - Optional diarization: pyannote/WhisperX-style pipeline for files and meetings, not MVP dictation.
 - Optional rewrite layer: local Ollama or `llama.cpp` OpenAI-compatible endpoint, with deterministic cleanup always available without an LLM.
 
-The recommended MVP is a local-first CLI named generically here as `vox`:
+The recommended MVP is a local-first CLI named `comlink`:
 
 ```bash
-vox record --paste
-vox transcribe meeting.m4a --format md
-vox listen --hotkey alt-space
-vox models install whisper-small.en
-vox vocab add "supabase" "Supabase"
-vox modes add prompt --instruction "Turn rough speech into a concise coding prompt."
+comlink record --paste
+comlink transcribe meeting.m4a --format md
+comlink listen --hotkey alt-space
+comlink models install whisper-small.en
+comlink vocab add "supabase" "Supabase"
+comlink modes add prompt --instruction "Turn rough speech into a concise coding prompt."
 ```
 
 ## What Wispr Flow-Like Apps Actually Do
@@ -133,8 +133,8 @@ Responsibilities:
 
 CLI implication:
 
-- MVP can start with foreground commands (`vox record`, press Enter to stop).
-- System-wide dictation requires a daemon (`vox listen`) plus OS-specific helpers.
+- MVP can start with foreground commands (`comlink record`, press Enter to stop).
+- System-wide dictation requires a daemon (`comlink listen`) plus OS-specific helpers.
 - Do not put hotkey handling directly inside the ASR engine; keep it as an input adapter.
 
 ### 2. Audio Capture Layer
@@ -230,8 +230,8 @@ Responsibilities:
 CLI implication:
 
 - In normal CLI mode, context is explicit: flags, stdin, current directory.
-- In daemon mode, context is OS-integrated and permission-gated.
-- Default should avoid screenshots. Surrounding text and selected text should be opt-in and visible in logs/history.
+- In daemon mode, active app name can be enabled by default because it is useful for mode selection and relatively low sensitivity.
+- Default should avoid screenshots. Clipboard, surrounding text, textbox content, and selected text should be opt-in and visible in logs/history.
 
 ### 7. Delivery Layer
 
@@ -263,7 +263,8 @@ Recommended default:
 
 - Local-only SQLite.
 - Audio retention off by default for short dictation.
-- Retain transcripts only if user enables history or command requests `--save`.
+- Retain session metadata by default.
+- Retain transcript text only if user enables transcript history or a command requests `--save`.
 - Models under XDG/macOS/Windows cache paths.
 
 ## Open-Weight Model & Runtime Choices
@@ -312,7 +313,7 @@ WhisperX layers VAD, batched `faster-whisper`, forced alignment, word-level time
 
 Use cases:
 
-- `vox transcribe --diarize`.
+- `comlink transcribe --diarize`.
 - SRT/VTT export.
 - Interview and meeting file transcription.
 
@@ -352,8 +353,9 @@ Use diarization only when needed. It adds dependencies, runtime cost, and model 
 Recommended:
 
 - MVP: no diarization.
-- Phase 2: WhisperX/pyannote for file transcription.
-- Phase 3: meeting mode with per-source capture first, diarization second. Mic/system-source separation often produces more useful labels than generic diarization alone.
+- Phase 2: lightweight meeting mode with explicit start/stop, visible recording state, mic capture, and transcript export. Use source labels when multiple audio sources are available, but do not require diarization.
+- Phase 3: meeting polish with source-separated capture where supported, better chunk stitching, Markdown export, and optional note markers.
+- Phase 4: WhisperX/pyannote for diarization, alignment, and file/meeting pro workflows. Mic/system-source separation often produces more useful labels than generic diarization alone.
 
 Sources: [pyannote.audio](https://github.com/pyannote/pyannote-audio), [WhisperX](https://github.com/m-bain/whisperX).
 
@@ -368,7 +370,7 @@ The CLI should not require an LLM. LLM rewriting should be mode-specific and dis
 
 Sources: [Ollama API docs](https://docs.ollama.com/api/introduction), [llama.cpp server](https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md).
 
-## Product Spec: `vox`, A Local CLI Transcription App
+## Product Spec: `comlink`, A Local CLI Transcription App
 
 ### Goals
 
@@ -397,56 +399,68 @@ Sources: [Ollama API docs](https://docs.ollama.com/api/introduction), [llama.cpp
 - As a privacy-sensitive user, I can prove the app made no network requests during transcription.
 - As a power user, I can script transcription in shell pipelines.
 
+### Resolved Product Decisions
+
+- MVP shape: terminal-first.
+- Core implementation language: Rust.
+- Default ASR path: `whisper.cpp` with `small.en` as the recommended default model.
+- Platform priority: macOS first.
+- History default: session metadata on, transcript text and audio retention off unless explicitly enabled.
+- Context default: CLI/git context plus active app name; clipboard, selected text, screenshots, and textbox content require explicit opt-in.
+- Delivery strategy: copy-first MVP, with active-app paste added through daemon adapters.
+- Terminal/coding mode: Phase 1, because developer dictation is central to the product.
+- Meeting mode: Phase 2 v0 with explicit start/stop, visible recording state, mic-first capture, and transcript export; diarization remains a later pro feature.
+
 ## CLI Surface
 
 ### Core Commands
 
 ```bash
 # Record from microphone, stop on Enter, print transcript.
-vox record
+comlink record
 
 # Record and copy/paste result.
-vox record --copy
-vox record --paste
+comlink record --copy
+comlink record --paste
 
 # Push-to-talk daemon with global hotkey.
-vox listen --hotkey alt-space --mode clean
+comlink listen --hotkey alt-space --mode clean
 
 # Transcribe files.
-vox transcribe audio.wav
-vox transcribe video.mp4 --format json
-vox transcribe interview.m4a --format srt
+comlink transcribe audio.wav
+comlink transcribe video.mp4 --format json
+comlink transcribe interview.m4a --format srt
 
 # Transcribe stdin audio bytes or file list.
-cat audio.wav | vox transcribe -
-find calls -name '*.mp3' | vox batch --format md
+cat audio.wav | comlink transcribe -
+find calls -name '*.mp3' | comlink batch --format md
 
 # Model management.
-vox models list
-vox models install whisper-base.en
-vox models install whisper-small
-vox models select whisper-small.en
+comlink models list
+comlink models install whisper-base.en
+comlink models install whisper-small
+comlink models select whisper-small.en
 
 # Vocabulary/snippets.
-vox vocab add "aye pee eye" "API"
-vox vocab add "super base" "Supabase"
-vox snippets add "my signature" "Best,\nLuke"
+comlink vocab add "aye pee eye" "API"
+comlink vocab add "super base" "Supabase"
+comlink snippets add "my signature" "Best,\nLuke"
 
 # Modes.
-vox modes list
-vox modes add prompt --instruction "Convert rambling dictation into a concise coding prompt. Preserve filenames and code symbols exactly."
-vox record --mode prompt --paste
+comlink modes list
+comlink modes add prompt --instruction "Convert rambling dictation into a concise coding prompt. Preserve filenames and code symbols exactly."
+comlink record --mode prompt --paste
 
 # History.
-vox history list
-vox history show <id>
-vox history prune --older-than 14d
+comlink history list
+comlink history show <id>
+comlink history prune --older-than 14d
 
 # Diagnostics.
-vox doctor
-vox devices
-vox config show
-vox privacy audit
+comlink doctor
+comlink devices
+comlink config show
+comlink privacy audit
 ```
 
 ### Output Formats
@@ -471,9 +485,9 @@ vox privacy audit
 
 Config path:
 
-- macOS: `~/Library/Application Support/vox/config.toml`
-- Linux: `~/.config/vox/config.toml`
-- Windows: `%APPDATA%\vox\config.toml`
+- macOS: `~/Library/Application Support/comlink/config.toml`
+- Linux: `~/.config/comlink/config.toml`
+- Windows: `%APPDATA%\comlink\config.toml`
 
 Example:
 
@@ -481,10 +495,12 @@ Example:
 [privacy]
 offline = true
 save_audio = false
-save_transcripts = true
-allow_context = false
+save_session_metadata = true
+save_transcripts = false
+allow_active_app_context = true
 allow_clipboard_context = false
 allow_selected_text_context = false
+allow_textbox_context = false
 
 [audio]
 device = "default"
@@ -538,7 +554,7 @@ Tables:
 
 Storage paths:
 
-- Models: OS cache dir, e.g. `~/Library/Caches/vox/models`.
+- Models: OS cache dir, e.g. `~/Library/Caches/comlink/models`.
 - Temp audio: OS temp dir, removed on completion.
 - Retained audio: app data dir only when `save_audio = true`.
 - Logs: app logs dir, redacted by default.
@@ -546,7 +562,7 @@ Storage paths:
 ## MVP Architecture
 
 ```text
-vox CLI
+comlink CLI
   |
   |-- command router
   |-- config manager
@@ -621,19 +637,19 @@ Requirements:
 - Clean temp WAVs even on failure.
 - Batch mode should skip completed files unless `--force`.
 
-### Meeting Mode, Later Phase
+### Meeting Mode, Early Roadmap
 
-CLI meeting mode should come after dictation and file transcription.
+CLI meeting mode should enter the roadmap soon after the useful terminal-first MVP. Phase 2 should provide a lightweight, explicit meeting capture flow; Phase 4 can add pro diarization, richer notes, and searchable transcript library features.
 
 ```text
-mic stream + system audio stream
-  -> source-specific files
-  -> live chunks for preview
-  -> final per-source transcription
-  -> align by host timestamps
-  -> merge into speaker-ish transcript
-  -> optional pyannote diarization
-  -> notes/summary transform
+meeting start
+  -> visible recording indicator
+  -> mic stream, plus system audio when available
+  -> VAD and timestamped chunks
+  -> rolling transcript preview or segments output
+  -> final transcript export
+  -> optional source-separated merge
+  -> later: pyannote diarization and notes/summary transform
 ```
 
 Requirements:
@@ -641,8 +657,10 @@ Requirements:
 - Consent reminder/visible indicator.
 - User-controlled start/stop.
 - Auto-stop on inactivity.
-- Source labels before diarization: `user_mic`, `system_audio`.
+- Phase 2 may be mic-only on macOS if system audio capture is not ready.
+- Source labels before diarization where available: `user_mic`, `system_audio`.
 - Do not retain audio by default.
+- Save meeting transcripts only when requested or when transcript history retention is enabled.
 
 ## Text Processing Spec
 
@@ -705,24 +723,25 @@ Default posture:
 - No network calls during transcription.
 - No telemetry.
 - No audio retention for dictation.
-- Transcript history opt-in or clear during onboarding.
-- Context capture off by default.
+- Session metadata history on by default.
+- Transcript text retention opt-in.
+- Active app context allowed by default; clipboard, selected text, textbox content, and screenshots opt-in.
 
 Controls:
 
 ```bash
-vox privacy audit
-vox config set privacy.offline true
-vox config set privacy.save_audio false
-vox config set privacy.save_transcripts false
-vox history prune --all
+comlink privacy audit
+comlink config set privacy.offline true
+comlink config set privacy.save_audio false
+comlink config set privacy.save_transcripts false
+comlink history prune --all
 ```
 
 Privacy audit should report:
 
 - Installed models and licenses.
 - Whether cloud/LLM endpoints are configured.
-- Whether history/audio retention is enabled.
+- Whether session metadata, transcript text, or audio retention is enabled.
 - Last network access attempted by the app, if instrumented.
 - Configured context permissions.
 
@@ -807,8 +826,8 @@ Metrics:
 
 ### Phase 0: Research Spike
 
-- Build `vox transcribe FILE` around system `whisper.cpp`.
-- Add `vox record` with simple microphone capture.
+- Build `comlink transcribe FILE` around system `whisper.cpp`.
+- Add `comlink record` with simple microphone capture.
 - Print text to stdout.
 - No history, no paste, no daemon.
 
@@ -818,33 +837,37 @@ Metrics:
 - FFmpeg conversion.
 - Silero VAD endpointing.
 - Deterministic clean mode.
+- Terminal/coding mode preserving shell syntax, filenames, URLs, camelCase, and snake_case.
 - Vocabulary and snippets.
 - Clipboard copy.
 - JSON/Markdown/SRT output.
 - SQLite history with transcript retention toggle.
 
-### Phase 2: Dictation Daemon
+### Phase 2: Dictation Daemon + Meeting Capture v0
 
-- `vox listen`.
+- `comlink listen`.
 - Global hotkey.
 - Recording indicator.
 - Copy/paste delivery.
 - App-specific mode mapping where OS supports active-app detection.
+- `comlink meet start` / `comlink meet stop` with explicit recording state.
+- Mic-first meeting capture, with system audio added where OS support is ready.
+- Meeting transcript export to Markdown/JSON without diarization.
 - Local LLM rewrite through Ollama/llama.cpp.
 
-### Phase 3: Power User / Developer Mode
+### Phase 3: Power User + Meeting Polish
 
-- Prompt mode for coding agents.
-- Terminal mode preserving shell syntax.
+- Advanced prompt mode for coding agents.
 - Selected text transform mode.
 - MCP/local HTTP server for agent integration.
 - Per-directory/project vocabulary.
 - Git-aware context: repo name, branch, changed files, optional current file.
+- Better meeting chunk stitching, source labels, and manual note markers.
 
 ### Phase 4: Meeting/File Pro Features
 
 - Diarization via WhisperX/pyannote.
-- System audio capture adapters.
+- Mature system audio capture adapters.
 - Meeting notes and action extraction.
 - Searchable transcript library.
 - Export to SRT/VTT/DOCX/Markdown.
@@ -874,11 +897,11 @@ Metrics:
 
 For fastest path to a working CLI:
 
-- CLI: Python + Typer or Rust + Clap.
+- CLI: Rust + Clap.
 - ASR: `whisper.cpp` subprocess.
-- Audio capture: `sounddevice` for Python spike, `cpal` for Rust.
+- Audio capture: `cpal` for Rust.
 - Conversion: FFmpeg.
-- VAD: Silero ONNX/Python initially; consider Rust/ONNX later.
+- VAD: Silero through ONNX Runtime or a worker adapter initially; consider a tighter Rust integration later.
 - Storage: SQLite.
 - Clipboard: platform adapters.
 - Local LLM: Ollama first, OpenAI-compatible endpoint second.
