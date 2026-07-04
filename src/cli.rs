@@ -1,6 +1,5 @@
 use std::env;
 use std::path::PathBuf;
-use std::time::Instant;
 
 use clap::{Parser, Subcommand};
 
@@ -151,14 +150,10 @@ fn record_memo(
     })?;
 
     if captured.duration_ms < min_duration_ms {
-        return Err(ComlinkError::EmptyTranscript);
-    }
-
-    let stop_to_final = Instant::now();
-    let normalized =
-        audio::normalize_to_wav(&captured.path, &runtime.ffmpeg, runtime.ffprobe.as_deref())?;
-    if normalized.duration_ms < min_duration_ms {
-        return Err(ComlinkError::EmptyTranscript);
+        return Err(ComlinkError::RecordingTooShort {
+            duration_ms: captured.duration_ms,
+            min_duration_ms,
+        });
     }
 
     let engine = WhisperCppEngine {
@@ -167,21 +162,19 @@ fn record_memo(
     };
     let source = SourceMetadata {
         path: "microphone".to_string(),
-        normalized_sample_rate_hz: normalized.sample_rate_hz,
-        normalized_channels: normalized.channels,
+        normalized_sample_rate_hz: captured.sample_rate_hz,
+        normalized_channels: captured.channels,
     };
 
-    let transcript = engine.transcribe(&normalized.path, source, normalized.duration_ms)?;
+    let transcript = engine.transcribe(&captured.path, source, captured.duration_ms)?;
     let transcript = output::TranscriptOutput::from_transcript(transcript, mode, copy);
+    let stop_to_final_ms = captured.stopped_at.elapsed().as_millis();
 
     if copy {
         clipboard::copy_text(&transcript.final_text)?;
         eprintln!("Copied final text to clipboard.");
     }
 
-    eprintln!(
-        "Stop-to-final latency: {} ms.",
-        stop_to_final.elapsed().as_millis()
-    );
+    eprintln!("Stop-to-final latency: {} ms.", stop_to_final_ms);
     output::print_transcript(&transcript, format)
 }

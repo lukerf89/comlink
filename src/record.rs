@@ -1,5 +1,5 @@
 use std::{
-    io::{self, Write},
+    io::{self, ErrorKind, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     thread,
@@ -23,6 +23,9 @@ pub struct RecordingOptions<'a> {
 pub struct CapturedAudio {
     pub path: PathBuf,
     pub duration_ms: u64,
+    pub sample_rate_hz: u32,
+    pub channels: u16,
+    pub stopped_at: Instant,
     _tempdir: TempDir,
 }
 
@@ -51,6 +54,7 @@ pub fn record_until_enter(options: RecordingOptions<'_>) -> Result<CapturedAudio
 
     let mut line = String::new();
     io::stdin().read_line(&mut line)?;
+    let stopped_at = Instant::now();
     stop_recorder(&mut child)?;
 
     let output = child
@@ -71,15 +75,29 @@ pub fn record_until_enter(options: RecordingOptions<'_>) -> Result<CapturedAudio
     Ok(CapturedAudio {
         path: wav_path,
         duration_ms,
+        sample_rate_hz: 16_000,
+        channels: 1,
+        stopped_at,
         _tempdir: tempdir,
     })
 }
 
 fn stop_recorder(child: &mut Child) -> Result<(), ComlinkError> {
+    if child
+        .try_wait()
+        .map_err(|error| ComlinkError::AudioCaptureFailed(error.to_string()))?
+        .is_some()
+    {
+        child.stdin.take();
+        return Ok(());
+    }
+
     if let Some(stdin) = child.stdin.as_mut() {
-        stdin
-            .write_all(b"q\n")
-            .map_err(|error| ComlinkError::AudioCaptureFailed(error.to_string()))?;
+        if let Err(error) = stdin.write_all(b"q\n") {
+            if error.kind() != ErrorKind::BrokenPipe {
+                return Err(ComlinkError::AudioCaptureFailed(error.to_string()));
+            }
+        }
     }
     child.stdin.take();
 

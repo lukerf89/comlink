@@ -1,2 +1,2 @@
 Recording... press Enter to stop.
-error: whisper.cpp produced no transcript text
+error: recording too short or no speech detected: captured 0 ms, minimum is 300 ms

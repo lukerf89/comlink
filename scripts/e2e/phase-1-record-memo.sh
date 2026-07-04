@@ -40,10 +40,15 @@ mock_whisper="$tmp_dir/mock-whisper"
 mock_pbcopy="$tmp_dir/mock-pbcopy"
 mock_model="$tmp_dir/mock-model.bin"
 clipboard_file="$tmp_dir/clipboard.txt"
+ffmpeg_log="$tmp_dir/ffmpeg.log"
 
 cat > "$mock_ffmpeg" <<'SH'
 #!/usr/bin/env bash
 set -euo pipefail
+
+if [ -n "${COMLINK_MOCK_FFMPEG_LOG:-}" ]; then
+  printf '%s\n' "$*" >> "$COMLINK_MOCK_FFMPEG_LOG"
+fi
 
 out=""
 for arg in "$@"; do
@@ -54,6 +59,15 @@ if [ -z "$out" ]; then
   echo "missing output path" >&2
   exit 2
 fi
+
+case " $* " in
+  *" avfoundation "*)
+    if [ "${COMLINK_MOCK_RECORDER_FAIL:-0}" = "1" ]; then
+      echo "mock microphone permission denied" >&2
+      exit 7
+    fi
+    ;;
+esac
 
 if [ "${COMLINK_MOCK_SHORT_AUDIO:-0}" = "1" ]; then
   : > "$out"
@@ -132,6 +146,7 @@ PY
 
 printf '\n' | \
 COMLINK_FFMPEG="$mock_ffmpeg" \
+COMLINK_MOCK_FFMPEG_LOG="$ffmpeg_log" \
 COMLINK_MOCK_FIXTURE="$fixture" \
 COMLINK_WHISPER_CPP="$mock_whisper" \
 COMLINK_WHISPER_MODEL="$mock_model" \
@@ -169,6 +184,11 @@ PY
 grep -q "Recording... press Enter to stop." "$artifact_dir/record-copy.err"
 grep -q "Copied final text to clipboard." "$artifact_dir/record-copy.err"
 grep -q "Stop-to-final latency:" "$artifact_dir/record-copy.err"
+if [ "$(wc -l < "$ffmpeg_log")" -ne 1 ]; then
+  echo "record should invoke ffmpeg exactly once" >&2
+  exit 1
+fi
+grep -q "avfoundation" "$ffmpeg_log"
 
 set +e
 printf '\n' | \
@@ -188,6 +208,30 @@ if [ "$no_speech_status" -ne 4 ]; then
   exit 1
 fi
 
-grep -q "whisper.cpp produced no transcript text" "$artifact_dir/no-speech.err"
+grep -q "recording too short or no speech detected" "$artifact_dir/no-speech.err"
+
+set +e
+printf '\n' | \
+COMLINK_FFMPEG="$mock_ffmpeg" \
+COMLINK_MOCK_FIXTURE="$fixture" \
+COMLINK_MOCK_RECORDER_FAIL=1 \
+COMLINK_WHISPER_CPP="$mock_whisper" \
+COMLINK_WHISPER_MODEL="$mock_model" \
+cargo run --quiet -- record --format json \
+  > "$artifact_dir/recorder-failed.out" \
+  2> "$artifact_dir/recorder-failed.err"
+recorder_failed_status=$?
+set -e
+
+if [ "$recorder_failed_status" -ne 2 ]; then
+  echo "expected recorder failure exit code 2, got $recorder_failed_status" >&2
+  exit 1
+fi
+
+grep -q "mock microphone permission denied" "$artifact_dir/recorder-failed.err"
+if grep -qi "broken pipe" "$artifact_dir/recorder-failed.err"; then
+  echo "recorder failure should surface ffmpeg stderr, not broken pipe" >&2
+  exit 1
+fi
 
 echo "Phase 1 E2E passed. Artifacts: $artifact_dir"

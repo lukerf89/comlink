@@ -34,6 +34,14 @@ pub enum ComlinkError {
     #[error("whisper.cpp produced no transcript text")]
     EmptyTranscript,
 
+    #[error(
+        "recording too short or no speech detected: captured {duration_ms} ms, minimum is {min_duration_ms} ms"
+    )]
+    RecordingTooShort {
+        duration_ms: u64,
+        min_duration_ms: u64,
+    },
+
     #[error("clipboard delivery failed: {0}")]
     ClipboardFailed(String),
 
@@ -49,9 +57,25 @@ impl ComlinkError {
         match self {
             Self::ModelMissing | Self::ModelPathMissing(_) | Self::WhisperFailed(_) => 3,
             Self::AudioCaptureFailed(_) => 2,
-            Self::EmptyTranscript => 4,
+            Self::EmptyTranscript | Self::RecordingTooShort { .. } => 4,
             Self::ClipboardFailed(_) => 5,
             _ => 1,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recording_too_short_uses_no_speech_exit_code() {
+        let error = ComlinkError::RecordingTooShort {
+            duration_ms: 0,
+            min_duration_ms: 300,
+        };
+
+        assert_eq!(error.exit_code(), 4);
+        assert!(error.to_string().contains("recording too short"));
     }
 }

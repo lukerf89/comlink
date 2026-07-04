@@ -57,10 +57,20 @@ impl AsrEngine for WhisperCppEngine {
         let output_dir = tempfile::tempdir()?;
         let output_base = output_dir.path().join("transcript");
 
-        let mut output = self.run_whisper(wav_path, &output_base, false)?;
-        if !output.status.success() {
-            output = self.run_whisper(wav_path, &output_base, true)?;
-        }
+        let output = self.run_whisper(wav_path, &output_base, false)?;
+        let output = if !output.status.success() && should_retry_without_gpu(&output.stderr) {
+            let retry = self.run_whisper(wav_path, &output_base, true)?;
+            if retry.status.success() {
+                retry
+            } else {
+                return Err(ComlinkError::WhisperFailed(combine_whisper_errors(
+                    &output.stderr,
+                    &retry.stderr,
+                )));
+            }
+        } else {
+            output
+        };
 
         if !output.status.success() {
             return Err(ComlinkError::WhisperFailed(trim_for_error(&output.stderr)));
@@ -129,6 +139,22 @@ fn trim_for_error(bytes: &[u8]) -> String {
     }
 }
 
+fn should_retry_without_gpu(stderr: &[u8]) -> bool {
+    let message = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    message.contains("metal")
+        || message.contains("gpu")
+        || message.contains("ggml_metal")
+        || message.contains("failed to allocate buffer")
+}
+
+fn combine_whisper_errors(first: &[u8], retry: &[u8]) -> String {
+    format!(
+        "initial GPU attempt failed: {}; CPU retry failed: {}",
+        trim_for_error(first),
+        trim_for_error(retry)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, io::Write};
@@ -189,5 +215,23 @@ printf 'hello from mock whisper\n' > "$out.txt"
         assert_eq!(transcript.model, model.display().to_string());
         assert_eq!(transcript.duration_ms, 1234);
         assert_eq!(transcript.segments[0].end_ms, 1234);
+    }
+
+    #[test]
+    fn cpu_retry_is_limited_to_gpu_backend_failures() {
+        assert!(should_retry_without_gpu(
+            b"ggml_metal_buffer_init: error: failed to allocate buffer"
+        ));
+        assert!(should_retry_without_gpu(b"GPU device failed"));
+        assert!(!should_retry_without_gpu(b"model path does not exist"));
+        assert!(!should_retry_without_gpu(b"invalid audio data"));
+    }
+
+    #[test]
+    fn combined_whisper_error_preserves_initial_failure_context() {
+        let message = combine_whisper_errors(b"metal allocation failed", b"cpu decode failed");
+
+        assert!(message.contains("initial GPU attempt failed: metal allocation failed"));
+        assert!(message.contains("CPU retry failed: cpu decode failed"));
     }
 }
