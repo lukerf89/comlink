@@ -1,0 +1,18 @@
+{
+  "text": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country.",
+  "engine": "whisper.cpp",
+  "model": "<model-path>",
+  "duration_ms": 11000,
+  "segments": [
+    {
+      "start_ms": 0,
+      "end_ms": 11000,
+      "text": "And so my fellow Americans ask not what your country can do for you ask what you can do for your country."
+    }
+  ],
+  "source": {
+    "path": "<source-path>",
+    "normalized_sample_rate_hz": 16000,
+    "normalized_channels": 1
+  }
+}
