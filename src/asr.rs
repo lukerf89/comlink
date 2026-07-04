@@ -57,14 +57,10 @@ impl AsrEngine for WhisperCppEngine {
         let output_dir = tempfile::tempdir()?;
         let output_base = output_dir.path().join("transcript");
 
-        let output = Command::new(&self.binary)
-            .arg("-m")
-            .arg(&self.model)
-            .arg("-f")
-            .arg(wav_path)
-            .args(["-otxt", "-of"])
-            .arg(&output_base)
-            .output()?;
+        let mut output = self.run_whisper(wav_path, &output_base, false)?;
+        if !output.status.success() {
+            output = self.run_whisper(wav_path, &output_base, true)?;
+        }
 
         if !output.status.success() {
             return Err(ComlinkError::WhisperFailed(trim_for_error(&output.stderr)));
@@ -94,6 +90,23 @@ impl AsrEngine for WhisperCppEngine {
             duration_ms,
             source,
         })
+    }
+}
+
+impl WhisperCppEngine {
+    fn run_whisper(
+        &self,
+        wav_path: &Path,
+        output_base: &Path,
+        no_gpu: bool,
+    ) -> Result<std::process::Output, ComlinkError> {
+        let mut command = Command::new(&self.binary);
+        command.arg("-m").arg(&self.model).arg("-f").arg(wav_path);
+        if no_gpu {
+            command.arg("-ng");
+        }
+        command.args(["-otxt", "-of"]).arg(output_base);
+        Ok(command.output()?)
     }
 }
 

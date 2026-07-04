@@ -1,7 +1,10 @@
 pub mod asr;
 pub mod audio;
 pub mod cli;
+pub mod clipboard;
 pub mod deps;
 pub mod doctor;
 pub mod error;
 pub mod output;
+pub mod record;
+pub mod text;

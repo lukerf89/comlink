@@ -1,6 +1,11 @@
 use clap::ValueEnum;
+use serde::Serialize;
 
-use crate::{asr::Transcript, error::ComlinkError};
+use crate::{
+    asr::{Segment, SourceMetadata, Transcript},
+    error::ComlinkError,
+    text::TextMode,
+};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum OutputFormat {
@@ -8,10 +13,56 @@ pub enum OutputFormat {
     Json,
 }
 
-pub fn print_transcript(transcript: &Transcript, format: OutputFormat) -> Result<(), ComlinkError> {
+#[derive(Debug, Clone, Serialize)]
+pub struct ProcessingStep {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptOutput {
+    pub text: String,
+    pub raw_text: String,
+    pub final_text: String,
+    pub mode: TextMode,
+    pub copied: bool,
+    pub engine: String,
+    pub model: String,
+    pub duration_ms: u64,
+    pub segments: Vec<Segment>,
+    pub source: SourceMetadata,
+    pub processing_steps: Vec<ProcessingStep>,
+}
+
+impl TranscriptOutput {
+    pub fn from_transcript(transcript: Transcript, mode: TextMode, copied: bool) -> Self {
+        let raw_text = transcript.text;
+        let final_text = mode.process(&raw_text);
+
+        Self {
+            text: final_text.clone(),
+            raw_text,
+            final_text,
+            mode,
+            copied,
+            engine: transcript.engine,
+            model: transcript.model,
+            duration_ms: transcript.duration_ms,
+            segments: transcript.segments,
+            source: transcript.source,
+            processing_steps: vec![ProcessingStep {
+                name: mode.processing_step().to_string(),
+            }],
+        }
+    }
+}
+
+pub fn print_transcript(
+    transcript: &TranscriptOutput,
+    format: OutputFormat,
+) -> Result<(), ComlinkError> {
     match format {
         OutputFormat::Text => {
-            println!("{}", transcript.text);
+            println!("{}", transcript.final_text);
             Ok(())
         }
         OutputFormat::Json => {
@@ -30,7 +81,7 @@ mod tests {
     #[test]
     fn json_includes_phase_zero_contract_fields() {
         let transcript = Transcript {
-            text: "hello".to_string(),
+            text: "hello  .".to_string(),
             engine: "whisper.cpp".to_string(),
             model: "model.bin".to_string(),
             duration_ms: 500,
@@ -45,13 +96,19 @@ mod tests {
                 normalized_channels: 1,
             },
         };
+        let transcript = TranscriptOutput::from_transcript(transcript, TextMode::Memo, true);
 
         let json = serde_json::to_value(&transcript).unwrap();
-        assert_eq!(json["text"], "hello");
+        assert_eq!(json["text"], "hello.");
+        assert_eq!(json["raw_text"], "hello  .");
+        assert_eq!(json["final_text"], "hello.");
+        assert_eq!(json["mode"], "memo");
+        assert_eq!(json["copied"], true);
         assert_eq!(json["engine"], "whisper.cpp");
         assert_eq!(json["model"], "model.bin");
         assert_eq!(json["duration_ms"], 500);
         assert!(json["segments"].is_array());
         assert_eq!(json["source"]["normalized_sample_rate_hz"], 16_000);
+        assert_eq!(json["processing_steps"][0]["name"], "memo-cleanup");
     }
 }

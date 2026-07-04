@@ -25,11 +25,17 @@ pub enum ComlinkError {
     #[error("ffmpeg failed to normalize audio: {0}")]
     FfmpegFailed(String),
 
+    #[error("audio capture failed: {0}")]
+    AudioCaptureFailed(String),
+
     #[error("whisper.cpp failed: {0}")]
     WhisperFailed(String),
 
     #[error("whisper.cpp produced no transcript text")]
     EmptyTranscript,
+
+    #[error("clipboard delivery failed: {0}")]
+    ClipboardFailed(String),
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
@@ -42,7 +48,9 @@ impl ComlinkError {
     pub fn exit_code(&self) -> u8 {
         match self {
             Self::ModelMissing | Self::ModelPathMissing(_) | Self::WhisperFailed(_) => 3,
+            Self::AudioCaptureFailed(_) => 2,
             Self::EmptyTranscript => 4,
+            Self::ClipboardFailed(_) => 5,
             _ => 1,
         }
     }
