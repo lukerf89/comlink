@@ -1,0 +1,1854 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Comlink Local Voice CLI - Visual Spec</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #fbfbf8;
+      --paper: #ffffff;
+      --paper-soft: #f4f7f5;
+      --ink: #19201e;
+      --muted: #5c6763;
+      --line: #d9dfda;
+      --line-strong: #aeb9b3;
+      --mint: #c9eadf;
+      --mint-ink: #064336;
+      --blue: #cfe2ff;
+      --blue-ink: #16385f;
+      --coral: #ffd1c2;
+      --coral-ink: #6f2819;
+      --amber: #ffe6a3;
+      --amber-ink: #5a3b00;
+      --green: #d8edb8;
+      --green-ink: #2c4f12;
+      --rose: #f4cad2;
+      --rose-ink: #642431;
+      --violet: #ddd6fe;
+      --violet-ink: #3c2a6f;
+      --terminal: #111715;
+      --terminal-2: #1d2724;
+      --terminal-line: #31403b;
+      --terminal-text: #d9efe7;
+      --terminal-muted: #8bb4a7;
+      --shadow: 0 18px 50px rgba(19, 35, 29, 0.12);
+      --radius: 8px;
+      --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+        "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: var(--sans);
+      font-size: 16px;
+      line-height: 1.55;
+    }
+
+    a {
+      color: #0b5e7a;
+      text-decoration: none;
+      border-bottom: 1px solid rgba(11, 94, 122, 0.28);
+    }
+
+    a:hover {
+      border-bottom-color: currentColor;
+    }
+
+    code,
+    pre {
+      font-family: var(--mono);
+    }
+
+    .page {
+      min-height: 100vh;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      border-bottom: 1px solid var(--line);
+      background: rgba(251, 251, 248, 0.93);
+      backdrop-filter: blur(14px);
+    }
+
+    .topbar-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 12px 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 172px;
+      font-weight: 800;
+    }
+
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: var(--terminal);
+      color: var(--terminal-text);
+      font-family: var(--mono);
+      font-size: 15px;
+    }
+
+    .nav {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px 16px;
+      font-size: 13px;
+    }
+
+    .nav a {
+      color: var(--muted);
+      border: 0;
+    }
+
+    .nav a:hover {
+      color: var(--ink);
+    }
+
+    .hero {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 44px 0 28px;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.95fr);
+      align-items: stretch;
+      gap: 32px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+      color: var(--mint-ink);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: #2fb982;
+      box-shadow: 0 0 0 5px rgba(47, 185, 130, 0.16);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 840px;
+      margin-bottom: 18px;
+      font-size: clamp(42px, 7vw, 86px);
+      line-height: 0.98;
+      letter-spacing: 0;
+    }
+
+    .hero p {
+      max-width: 780px;
+      color: var(--muted);
+      font-size: clamp(17px, 2vw, 21px);
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 28px;
+    }
+
+    .button {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 42px;
+      padding: 10px 14px;
+      border: 1px solid var(--line-strong);
+      border-radius: var(--radius);
+      background: var(--paper);
+      color: var(--ink);
+      font-size: 14px;
+      font-weight: 750;
+      box-shadow: 0 1px 0 rgba(255, 255, 255, 0.9) inset;
+    }
+
+    .button.primary {
+      background: var(--terminal);
+      color: var(--terminal-text);
+      border-color: var(--terminal);
+    }
+
+    .button svg {
+      width: 16px;
+      height: 16px;
+      stroke-width: 2;
+      flex: 0 0 auto;
+    }
+
+    .terminal-window {
+      overflow: hidden;
+      border: 1px solid #27332f;
+      border-radius: var(--radius);
+      background: var(--terminal);
+      color: var(--terminal-text);
+      box-shadow: var(--shadow);
+    }
+
+    .terminal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 38px;
+      padding: 0 13px;
+      border-bottom: 1px solid var(--terminal-line);
+      background: var(--terminal-2);
+      color: var(--terminal-muted);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .lights {
+      display: flex;
+      gap: 7px;
+    }
+
+    .light {
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: #6d7d77;
+    }
+
+    .light:nth-child(1) {
+      background: #ff695c;
+    }
+
+    .light:nth-child(2) {
+      background: #ffd05d;
+    }
+
+    .light:nth-child(3) {
+      background: #53d46a;
+    }
+
+    .terminal-body {
+      padding: 18px;
+      font-family: var(--mono);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .terminal-line {
+      display: flex;
+      gap: 10px;
+      min-width: 0;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .prompt {
+      color: #6ee7b7;
+      flex: 0 0 auto;
+    }
+
+    .term-muted {
+      color: var(--terminal-muted);
+    }
+
+    .term-accent {
+      color: #ffe082;
+    }
+
+    .term-good {
+      color: #9ff7d0;
+    }
+
+    .meter {
+      display: grid;
+      grid-template-columns: repeat(22, 1fr);
+      gap: 3px;
+      margin: 16px 0 12px;
+    }
+
+    .meter span {
+      height: 28px;
+      border-radius: 3px;
+      background: #27403a;
+    }
+
+    .meter span:nth-child(3n),
+    .meter span:nth-child(4n) {
+      background: #6ee7b7;
+    }
+
+    .meter span:nth-child(5n) {
+      background: #ffe082;
+    }
+
+    .terminal-status {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .status-pill {
+      min-width: 0;
+      padding: 8px;
+      border: 1px solid var(--terminal-line);
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .status-pill b {
+      display: block;
+      color: #ffffff;
+      font-size: 12px;
+    }
+
+    .status-pill span {
+      color: var(--terminal-muted);
+      font-size: 11px;
+    }
+
+    .content {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding-bottom: 72px;
+    }
+
+    section {
+      padding: 44px 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.7fr) minmax(280px, 0.3fr);
+      gap: 32px;
+      align-items: end;
+      margin-bottom: 24px;
+    }
+
+    .section-kicker {
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    h2 {
+      margin-bottom: 8px;
+      font-size: clamp(27px, 4vw, 44px);
+      line-height: 1.05;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin-bottom: 10px;
+      font-size: 18px;
+      line-height: 1.2;
+    }
+
+    .section-head p,
+    .lede {
+      color: var(--muted);
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin: 28px 0 0;
+    }
+
+    .stat {
+      min-height: 124px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .stat b {
+      display: block;
+      margin-bottom: 6px;
+      font-size: clamp(24px, 4vw, 34px);
+      line-height: 1;
+    }
+
+    .stat span {
+      display: block;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .rail {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .card {
+      min-width: 0;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .card p,
+    .card li {
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      min-height: 24px;
+      margin-bottom: 12px;
+      padding: 2px 8px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .tag.mint {
+      background: var(--mint);
+      color: var(--mint-ink);
+    }
+
+    .tag.blue {
+      background: var(--blue);
+      color: var(--blue-ink);
+    }
+
+    .tag.coral {
+      background: var(--coral);
+      color: var(--coral-ink);
+    }
+
+    .tag.amber {
+      background: var(--amber);
+      color: var(--amber-ink);
+    }
+
+    .tag.green {
+      background: var(--green);
+      color: var(--green-ink);
+    }
+
+    .tag.rose {
+      background: var(--rose);
+      color: var(--rose-ink);
+    }
+
+    .tag.violet {
+      background: var(--violet);
+      color: var(--violet-ink);
+    }
+
+    .pipeline {
+      display: grid;
+      grid-template-columns: repeat(8, minmax(130px, 1fr));
+      gap: 10px;
+      overflow-x: auto;
+      padding: 4px 0 10px;
+    }
+
+    .stage {
+      position: relative;
+      min-width: 130px;
+      min-height: 166px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .stage::after {
+      content: "->";
+      position: absolute;
+      top: 20px;
+      right: -14px;
+      z-index: 2;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-weight: 800;
+    }
+
+    .stage:last-child::after {
+      content: "";
+    }
+
+    .stage-num {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      margin-bottom: 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 999px;
+      background: var(--paper-soft);
+      color: var(--ink);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .stage h3 {
+      margin-bottom: 7px;
+      font-size: 16px;
+    }
+
+    .stage p {
+      margin-bottom: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .pattern-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .product-pattern {
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      min-height: 218px;
+    }
+
+    .pattern-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .pattern-list li {
+      position: relative;
+      margin: 0 0 8px;
+      padding-left: 16px;
+    }
+
+    .pattern-list li::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0.65em;
+      width: 6px;
+      height: 6px;
+      border-radius: 999px;
+      background: #2fb982;
+    }
+
+    .matrix-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 980px;
+      font-size: 14px;
+    }
+
+    th,
+    td {
+      padding: 12px 13px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      background: var(--paper-soft);
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td {
+      border-bottom: 0;
+    }
+
+    .yes,
+    .no,
+    .mixed,
+    .later {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 68px;
+      min-height: 26px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .yes {
+      background: var(--green);
+      color: var(--green-ink);
+    }
+
+    .no {
+      background: var(--rose);
+      color: var(--rose-ink);
+    }
+
+    .mixed {
+      background: var(--amber);
+      color: var(--amber-ink);
+    }
+
+    .later {
+      background: var(--blue);
+      color: var(--blue-ink);
+    }
+
+    .split {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(320px, 0.72fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .flow-lanes {
+      display: grid;
+      gap: 10px;
+    }
+
+    .lane {
+      display: grid;
+      grid-template-columns: 160px minmax(0, 1fr);
+      min-height: 74px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      overflow: hidden;
+    }
+
+    .lane-title {
+      display: flex;
+      align-items: center;
+      padding: 14px;
+      border-right: 1px solid var(--line);
+      background: var(--paper-soft);
+      font-weight: 800;
+    }
+
+    .lane-body {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding: 12px;
+    }
+
+    .chip {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #fff;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .decision-map {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .decision {
+      min-height: 156px;
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .decision strong {
+      display: block;
+      margin-bottom: 7px;
+    }
+
+    .decision span {
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .architecture-diagram {
+      display: grid;
+      gap: 12px;
+    }
+
+    .arch-row {
+      display: grid;
+      grid-template-columns: 170px minmax(0, 1fr);
+      align-items: stretch;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+      overflow: hidden;
+    }
+
+    .arch-label {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 14px;
+      background: var(--terminal);
+      color: var(--terminal-text);
+      font-weight: 800;
+      text-align: center;
+    }
+
+    .arch-modules {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      padding: 10px;
+    }
+
+    .module {
+      min-height: 56px;
+      padding: 10px;
+      border: 1px dashed var(--line-strong);
+      border-radius: 6px;
+      background: var(--paper-soft);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .schema {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .table-card {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .table-card h3 {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 12px;
+      font-family: var(--mono);
+      font-size: 15px;
+    }
+
+    .fields {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 7px;
+    }
+
+    .field {
+      display: inline-flex;
+      padding: 4px 8px;
+      border-radius: 999px;
+      background: var(--paper-soft);
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(180px, 1fr));
+      gap: 12px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }
+
+    .phase {
+      min-width: 180px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .phase-num {
+      display: inline-flex;
+      align-items: center;
+      min-height: 26px;
+      margin-bottom: 12px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: var(--terminal);
+      color: var(--terminal-text);
+      font-family: var(--mono);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .phase ul,
+    .card ul,
+    .question-list {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .phase li,
+    .question-list li {
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .terminal-gallery {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 16px;
+    }
+
+    .mini-terminal .terminal-body {
+      min-height: 300px;
+    }
+
+    .command-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .command {
+      padding: 14px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    .command code {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--ink);
+      font-size: 13px;
+      white-space: pre-wrap;
+    }
+
+    .command p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .questions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    details {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper);
+    }
+
+    summary {
+      cursor: pointer;
+      padding: 15px 16px;
+      font-weight: 800;
+    }
+
+    details[open] summary {
+      border-bottom: 1px solid var(--line);
+    }
+
+    .question-body {
+      padding: 15px 16px 16px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .callout {
+      display: grid;
+      grid-template-columns: 48px minmax(0, 1fr);
+      gap: 14px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--paper-soft);
+    }
+
+    .callout-icon {
+      display: grid;
+      place-items: center;
+      width: 48px;
+      height: 48px;
+      border-radius: var(--radius);
+      background: var(--terminal);
+      color: var(--terminal-text);
+      font-family: var(--mono);
+      font-weight: 800;
+    }
+
+    .source-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+    }
+
+    .source-links a {
+      display: inline-flex;
+      align-items: center;
+      min-height: 30px;
+      padding: 4px 9px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--paper);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .footer {
+      padding: 28px 0 56px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    @media (max-width: 980px) {
+      .hero-grid,
+      .section-head,
+      .split,
+      .terminal-gallery {
+        grid-template-columns: 1fr;
+      }
+
+      .stats,
+      .rail,
+      .pattern-grid,
+      .decision-map,
+      .schema,
+      .questions,
+      .command-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .terminal-status {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .topbar-inner {
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .nav {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 680px) {
+      .hero {
+        padding-top: 28px;
+      }
+
+      .stats,
+      .rail,
+      .pattern-grid,
+      .decision-map,
+      .schema,
+      .questions,
+      .command-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .lane,
+      .arch-row {
+        grid-template-columns: 1fr;
+      }
+
+      .lane-title,
+      .arch-label {
+        border-right: 0;
+        border-bottom: 1px solid var(--line);
+        justify-content: flex-start;
+      }
+
+      .arch-modules {
+        grid-template-columns: 1fr;
+      }
+
+      .terminal-body {
+        font-size: 12px;
+      }
+    }
+
+    @media print {
+      .topbar {
+        position: static;
+      }
+
+      .button {
+        display: none;
+      }
+
+      section {
+        break-inside: avoid;
+      }
+
+      body {
+        background: #fff;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="topbar">
+      <div class="topbar-inner">
+        <div class="brand" aria-label="Comlink visual spec">
+          <div class="brand-mark">cl</div>
+          <span>comlink visual spec</span>
+        </div>
+        <nav class="nav" aria-label="Page sections">
+          <a href="#overview">Overview</a>
+          <a href="#patterns">Patterns</a>
+          <a href="#architecture">Architecture</a>
+          <a href="#terminal">Terminal</a>
+          <a href="#roadmap">Roadmap</a>
+          <a href="#questions">Questions</a>
+        </nav>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero" id="overview">
+        <div class="hero-grid">
+          <div>
+            <div class="eyebrow"><span class="dot"></span> Local-first voice transcription CLI</div>
+            <h1>Comlink turns speech into paste-ready commands, prompts, notes, and transcripts.</h1>
+            <p>
+              This artifact distills the research spec into a visual map of the product shape:
+              a tiny terminal control plane around local ASR, deterministic cleanup, optional
+              local rewrite models, explicit context, and pluggable delivery.
+            </p>
+            <div class="hero-actions">
+              <a class="button primary" href="#terminal" aria-label="Jump to terminal vision">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                  <path d="m7 8 4 4-4 4"></path>
+                  <path d="M13 16h4"></path>
+                  <rect x="3" y="4" width="18" height="16" rx="2"></rect>
+                </svg>
+                Terminal vision
+              </a>
+              <a class="button" href="local-cli-transcription-app-spec.md">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" aria-hidden="true">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <path d="M14 2v6h6"></path>
+                  <path d="M16 13H8"></path>
+                  <path d="M16 17H8"></path>
+                  <path d="M10 9H8"></path>
+                </svg>
+                Source markdown
+              </a>
+            </div>
+          </div>
+
+          <div class="terminal-window" aria-label="Comlink terminal mockup">
+            <div class="terminal-head">
+              <div class="lights" aria-hidden="true">
+                <span class="light"></span>
+                <span class="light"></span>
+                <span class="light"></span>
+              </div>
+              <span>comlink record --mode prompt --paste</span>
+            </div>
+            <div class="terminal-body">
+              <div class="terminal-line"><span class="prompt">$</span><span>comlink record --mode prompt --paste</span></div>
+              <div class="terminal-line"><span></span><span class="term-muted">mic: MacBook Pro Microphone | model: whisper-small.en | offline: on</span></div>
+              <div class="meter" aria-hidden="true">
+                <span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span><span></span><span></span>
+                <span></span><span></span><span></span><span></span>
+              </div>
+              <div class="terminal-line"><span></span><span><span class="term-accent">recording</span> speak now, press Enter to stop</span></div>
+              <div class="terminal-line"><span></span><span class="term-muted">vad: speech 3.4s | endpoint: manual | pre-roll: 450ms</span></div>
+              <div class="terminal-line"><span></span><span class="term-good">pasted:</span></div>
+              <div class="terminal-line"><span></span><span>Implement a Rust CLI command named models install that downloads a verified whisper.cpp model, stores it in the OS cache dir, and records license metadata in SQLite.</span></div>
+
+              <div class="terminal-status">
+                <div class="status-pill"><b>ASR</b><span>whisper.cpp</span></div>
+                <div class="status-pill"><b>VAD</b><span>Silero</span></div>
+                <div class="status-pill"><b>Mode</b><span>prompt</span></div>
+                <div class="status-pill"><b>Delivery</b><span>paste</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="stats" aria-label="Spec highlights">
+          <div class="stat"><b>8</b><span>pipeline layers kept separate for testability and future OS adapters</span></div>
+          <div class="stat"><b>0</b><span>cloud calls in the default transcription path after model install</span></div>
+          <div class="stat"><b>5</b><span>build phases from research spike to meeting and file pro features</span></div>
+          <div class="stat"><b>1</b><span>core promise: local voice in, clean text out, inspectable all the way down</span></div>
+        </div>
+      </section>
+
+      <div class="content">
+        <section id="patterns">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Research synthesis</div>
+              <h2>What the winning products have in common</h2>
+            </div>
+            <p>
+              The best systems are not just ASR. They combine trigger UX, audio boundaries,
+              text cleanup, context, delivery, and history into a coherent loop.
+            </p>
+          </div>
+
+          <div class="pattern-grid">
+            <article class="card product-pattern">
+              <div>
+                <span class="tag blue">Wispr Flow</span>
+                <h3>Polish through context</h3>
+              </div>
+              <ul class="pattern-list">
+                <li>System-wide hotkey and text insertion</li>
+                <li>App, textbox, and window context improves formatting</li>
+                <li>Dictionary, snippets, styles, history, and usage stats</li>
+              </ul>
+              <p>Lesson: dictation feels magical when context and delivery are reliable.</p>
+            </article>
+
+            <article class="card product-pattern">
+              <div>
+                <span class="tag green">Superwhisper</span>
+                <h3>Modes as the product primitive</h3>
+              </div>
+              <ul class="pattern-list">
+                <li>Voice processing is separate from AI processing</li>
+                <li>Modes choose model, language, LLM, and instructions</li>
+                <li>Local Whisper and Parakeet options are explicit</li>
+              </ul>
+              <p>Lesson: comlink should make mode selection fast and inspectable.</p>
+            </article>
+
+            <article class="card product-pattern">
+              <div>
+                <span class="tag coral">Aqua Voice</span>
+                <h3>Real-time refinement matters</h3>
+              </div>
+              <ul class="pattern-list">
+                <li>Developer accuracy needs syntax and jargon awareness</li>
+                <li>Writing style rules and dictionary are first-class</li>
+                <li>Screen context can be part of accuracy, not just styling</li>
+              </ul>
+              <p>Lesson: technical terms and code symbols deserve their own mode.</p>
+            </article>
+
+            <article class="card product-pattern">
+              <div>
+                <span class="tag amber">Granola</span>
+                <h3>Meetings are a different lifecycle</h3>
+              </div>
+              <ul class="pattern-list">
+                <li>Explicit start/stop and visible recording state</li>
+                <li>Mic plus system audio is more useful than one stream</li>
+                <li>Notes and transcripts persist even when audio does not</li>
+              </ul>
+              <p>Lesson: meeting mode should be a later dedicated pipeline.</p>
+            </article>
+
+            <article class="card product-pattern">
+              <div>
+                <span class="tag violet">OpenWhispr and VoiceInk</span>
+                <h3>OS helpers are real infrastructure</h3>
+              </div>
+              <ul class="pattern-list">
+                <li>Native helpers handle hotkeys, paste, and monitoring</li>
+                <li>Local models, SQLite, history, dictionary, and modes recur</li>
+                <li>Active app, URL, selection, and clipboard can feed context</li>
+              </ul>
+              <p>Lesson: paste and hotkey belong behind adapters, not ASR.</p>
+            </article>
+
+            <article class="card product-pattern">
+              <div>
+                <span class="tag mint">MacParakeet</span>
+                <h3>Pipeline scheduling is a feature</h3>
+              </div>
+              <ul class="pattern-list">
+                <li>Separate dictation, meeting, file, and URL pipelines</li>
+                <li>Shared mic stream and STT scheduler</li>
+                <li>SQLite library, vocabulary, snippets, transforms</li>
+              </ul>
+              <p>Lesson: background jobs and live dictation should not fight.</p>
+            </article>
+          </div>
+
+          <div class="matrix-wrap" style="margin-top: 18px;">
+            <table aria-label="Competitive feature matrix">
+              <thead>
+                <tr>
+                  <th>Capability</th>
+                  <th>Wispr</th>
+                  <th>Superwhisper</th>
+                  <th>Granola</th>
+                  <th>VoiceInk/OpenWhispr</th>
+                  <th>Comlink target</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Local/offline transcription</td>
+                  <td><span class="no">No</span></td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="mixed">Hybrid</span></td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="yes">Default</span></td>
+                </tr>
+                <tr>
+                  <td>System-wide dictation</td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="no">No</span></td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="later">Phase 2</span></td>
+                </tr>
+                <tr>
+                  <td>Modes and style transforms</td>
+                  <td><span class="yes">Strong</span></td>
+                  <td><span class="yes">Strong</span></td>
+                  <td><span class="mixed">Templates</span></td>
+                  <td><span class="yes">Strong</span></td>
+                  <td><span class="yes">Core</span></td>
+                </tr>
+                <tr>
+                  <td>Meeting capture</td>
+                  <td><span class="mixed">Limited</span></td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="yes">Primary</span></td>
+                  <td><span class="mixed">Some</span></td>
+                  <td><span class="later">Phase 4</span></td>
+                </tr>
+                <tr>
+                  <td>Developer-oriented command and prompt dictation</td>
+                  <td><span class="yes">Yes</span></td>
+                  <td><span class="mixed">Mode-led</span></td>
+                  <td><span class="no">No</span></td>
+                  <td><span class="mixed">Some</span></td>
+                  <td><span class="yes">Phase 3</span></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="architecture">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Architecture pattern</div>
+              <h2>Separate the voice loop into small, inspectable stages</h2>
+            </div>
+            <p>
+              Each stage should be independently replaceable. That keeps the MVP simple while
+              leaving room for a daemon, faster models, local LLMs, and meeting workflows.
+            </p>
+          </div>
+
+          <div class="pipeline" aria-label="End-to-end pipeline">
+            <article class="stage">
+              <div class="stage-num">01</div>
+              <h3>Trigger</h3>
+              <p>Foreground command now; global hotkey and push-to-talk in daemon mode later.</p>
+            </article>
+            <article class="stage">
+              <div class="stage-num">02</div>
+              <h3>Capture</h3>
+              <p>Mic input, permissions, level meter, pre-roll, 16 kHz mono WAV normalization.</p>
+            </article>
+            <article class="stage">
+              <div class="stage-num">03</div>
+              <h3>VAD</h3>
+              <p>Silero finds speech regions, trims silence, and blocks empty audio hallucinations.</p>
+            </article>
+            <article class="stage">
+              <div class="stage-num">04</div>
+              <h3>ASR</h3>
+              <p>whisper.cpp by default, with adapters for faster-whisper and Parakeet.</p>
+            </article>
+            <article class="stage">
+              <div class="stage-num">05</div>
+              <h3>Cleanup</h3>
+              <p>Deterministic filler removal, vocabulary, snippets, punctuation, and actions.</p>
+            </article>
+            <article class="stage">
+              <div class="stage-num">06</div>
+              <h3>Context</h3>
+              <p>Explicit CLI flags, cwd, git hints, selected text, and app context only when allowed.</p>
+            </article>
+            <article class="stage">
+              <div class="stage-num">07</div>
+              <h3>Delivery</h3>
+              <p>stdout, JSON, Markdown, clipboard, paste adapter, saved transcript, or API/MCP.</p>
+            </article>
+            <article class="stage">
+              <div class="stage-num">08</div>
+              <h3>Storage</h3>
+              <p>SQLite history, model registry, vocabulary, snippets, modes, logs, and retention.</p>
+            </article>
+          </div>
+
+          <div class="split" style="margin-top: 22px;">
+            <div class="flow-lanes" aria-label="Layer responsibilities">
+              <div class="lane">
+                <div class="lane-title">Inputs</div>
+                <div class="lane-body">
+                  <span class="chip">record</span>
+                  <span class="chip">listen</span>
+                  <span class="chip">transcribe FILE</span>
+                  <span class="chip">batch</span>
+                  <span class="chip">stdin audio</span>
+                </div>
+              </div>
+              <div class="lane">
+                <div class="lane-title">Local engines</div>
+                <div class="lane-body">
+                  <span class="chip">whisper.cpp</span>
+                  <span class="chip">faster-whisper</span>
+                  <span class="chip">Parakeet</span>
+                  <span class="chip">WhisperX</span>
+                  <span class="chip">Silero VAD</span>
+                </div>
+              </div>
+              <div class="lane">
+                <div class="lane-title">Transforms</div>
+                <div class="lane-body">
+                  <span class="chip">raw</span>
+                  <span class="chip">clean</span>
+                  <span class="chip">prompt</span>
+                  <span class="chip">terminal</span>
+                  <span class="chip">LLM rewrite</span>
+                </div>
+              </div>
+              <div class="lane">
+                <div class="lane-title">Outputs</div>
+                <div class="lane-body">
+                  <span class="chip">stdout</span>
+                  <span class="chip">clipboard</span>
+                  <span class="chip">paste</span>
+                  <span class="chip">json</span>
+                  <span class="chip">md</span>
+                  <span class="chip">srt/vtt</span>
+                </div>
+              </div>
+            </div>
+
+            <aside class="callout">
+              <div class="callout-icon">!</div>
+              <div>
+                <h3>Core design rule</h3>
+                <p>
+                  Deterministic cleanup runs before any LLM rewrite. Raw text is always retained
+                  when history is enabled, and LLM failure falls back to clean text with a warning.
+                </p>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="runtime">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Runtime choices</div>
+              <h2>A model stack that starts boring and grows sideways</h2>
+            </div>
+            <p>
+              The practical default is portable local inference first, with specialized engines
+              added by mode and workload rather than forcing every user into a heavy ML stack.
+            </p>
+          </div>
+
+          <div class="decision-map" aria-label="Runtime decision map">
+            <div class="decision">
+              <span class="tag mint">Default</span>
+              <strong>whisper.cpp</strong>
+              <span>Best MVP runtime: portable, CPU-friendly, easy to shell out to, and simple to package with model files.</span>
+            </div>
+            <div class="decision">
+              <span class="tag green">VAD</span>
+              <strong>Silero</strong>
+              <span>Fast speech boundaries, silence trimming, and empty-audio rejection before ASR.</span>
+            </div>
+            <div class="decision">
+              <span class="tag blue">Batch</span>
+              <strong>faster-whisper</strong>
+              <span>GPU and quantized acceleration for file queues, archives, and server-style work.</span>
+            </div>
+            <div class="decision">
+              <span class="tag coral">Low latency</span>
+              <strong>Parakeet</strong>
+              <span>Experimental path for supported languages when packaging and licensing are acceptable.</span>
+            </div>
+            <div class="decision">
+              <span class="tag amber">Files and meetings</span>
+              <strong>WhisperX</strong>
+              <span>Word timestamps, alignment, and diarization, but not an MVP dependency.</span>
+            </div>
+          </div>
+
+          <div class="architecture-diagram" style="margin-top: 22px;">
+            <div class="arch-row">
+              <div class="arch-label">comlink CLI</div>
+              <div class="arch-modules">
+                <div class="module">Command router and config precedence</div>
+                <div class="module">Mode resolver: raw, clean, prompt, terminal</div>
+                <div class="module">Output formatter: text, json, md, srt, segments</div>
+              </div>
+            </div>
+            <div class="arch-row">
+              <div class="arch-label">Adapters</div>
+              <div class="arch-modules">
+                <div class="module">Audio capture and FFmpeg conversion</div>
+                <div class="module">Clipboard and paste delivery</div>
+                <div class="module">Engine workers and subprocess boundaries</div>
+              </div>
+            </div>
+            <div class="arch-row">
+              <div class="arch-label">Local state</div>
+              <div class="arch-modules">
+                <div class="module">SQLite sessions, segments, words</div>
+                <div class="module">Vocabulary, snippets, modes</div>
+                <div class="module">Model registry, licenses, cache paths</div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="data">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Data model</div>
+              <h2>Keep privacy visible in the schema</h2>
+            </div>
+            <p>
+              The schema separates raw text, final text, audio retention, model metadata,
+              and user customization. That gives the CLI useful history without hiding policy.
+            </p>
+          </div>
+
+          <div class="schema" aria-label="SQLite schema sketch">
+            <article class="table-card">
+              <h3>sessions <span class="tag mint">core</span></h3>
+              <div class="fields">
+                <span class="field">id</span>
+                <span class="field">kind</span>
+                <span class="field">started_at</span>
+                <span class="field">duration_ms</span>
+                <span class="field">engine</span>
+                <span class="field">model</span>
+                <span class="field">mode</span>
+                <span class="field">text_raw</span>
+                <span class="field">text_final</span>
+                <span class="field">audio_path?</span>
+              </div>
+            </article>
+            <article class="table-card">
+              <h3>segments <span class="tag blue">timing</span></h3>
+              <div class="fields">
+                <span class="field">session_id</span>
+                <span class="field">index</span>
+                <span class="field">start_ms</span>
+                <span class="field">end_ms</span>
+                <span class="field">speaker?</span>
+                <span class="field">text</span>
+                <span class="field">confidence?</span>
+              </div>
+            </article>
+            <article class="table-card">
+              <h3>words <span class="tag amber">optional</span></h3>
+              <div class="fields">
+                <span class="field">segment_id</span>
+                <span class="field">index</span>
+                <span class="field">start_ms</span>
+                <span class="field">end_ms</span>
+                <span class="field">text</span>
+                <span class="field">confidence?</span>
+              </div>
+            </article>
+            <article class="table-card">
+              <h3>vocabulary <span class="tag green">personal</span></h3>
+              <div class="fields">
+                <span class="field">phrase</span>
+                <span class="field">replacement</span>
+                <span class="field">enabled</span>
+                <span class="field">created_at</span>
+                <span class="field">updated_at</span>
+              </div>
+            </article>
+            <article class="table-card">
+              <h3>snippets <span class="tag coral">actions</span></h3>
+              <div class="fields">
+                <span class="field">trigger</span>
+                <span class="field">expansion</span>
+                <span class="field">action?</span>
+                <span class="field">enabled</span>
+                <span class="field">use_count</span>
+              </div>
+            </article>
+            <article class="table-card">
+              <h3>modes <span class="tag violet">behavior</span></h3>
+              <div class="fields">
+                <span class="field">name</span>
+                <span class="field">kind</span>
+                <span class="field">settings_json</span>
+                <span class="field">llm_instruction?</span>
+                <span class="field">context_policy_json</span>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section id="terminal">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Terminal vision</div>
+              <h2>Comlink should feel like a fast, local instrument</h2>
+            </div>
+            <p>
+              The terminal UI can be quiet by default, then expose timing, model, privacy,
+              and pipeline details when the user asks for them.
+            </p>
+          </div>
+
+          <div class="terminal-gallery">
+            <div class="terminal-window mini-terminal">
+              <div class="terminal-head">
+                <div class="lights" aria-hidden="true">
+                  <span class="light"></span><span class="light"></span><span class="light"></span>
+                </div>
+                <span>short dictation</span>
+              </div>
+              <div class="terminal-body">
+                <div class="terminal-line"><span class="prompt">$</span><span>comlink record --mode terminal --copy</span></div>
+                <div class="terminal-line"><span></span><span class="term-muted">ready | offline | press Enter to stop</span></div>
+                <div class="meter" aria-hidden="true">
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span><span></span><span></span>
+                  <span></span><span></span><span></span><span></span>
+                </div>
+                <div class="terminal-line"><span></span><span class="term-muted">raw: run cargo test package comlink core and show failures</span></div>
+                <div class="terminal-line"><span></span><span><span class="term-good">copied:</span> cargo test -p comlink-core -- --nocapture</span></div>
+                <div class="terminal-line"><span></span><span class="term-muted">session 8f42 | asr 421ms | cleanup 7ms | clipboard 18ms</span></div>
+              </div>
+            </div>
+
+            <div class="terminal-window mini-terminal">
+              <div class="terminal-head">
+                <div class="lights" aria-hidden="true">
+                  <span class="light"></span><span class="light"></span><span class="light"></span>
+                </div>
+                <span>daemon mode</span>
+              </div>
+              <div class="terminal-body">
+                <div class="terminal-line"><span class="prompt">$</span><span>comlink listen --hotkey alt-space --mode clean</span></div>
+                <div class="terminal-line"><span></span><span class="term-good">listening</span></div>
+                <div class="terminal-line"><span></span><span class="term-muted">hotkey: alt-space | mic: default | paste: copy-first</span></div>
+                <div class="terminal-line"><span></span><span class="term-muted">context: off | history: transcripts only | audio: discard</span></div>
+                <br>
+                <div class="terminal-line"><span></span><span>alt-space pressed in Cursor</span></div>
+                <div class="terminal-line"><span></span><span class="term-muted">mode resolved: prompt via app rule</span></div>
+                <div class="terminal-line"><span></span><span><span class="term-accent">recording</span> visible indicator active</span></div>
+                <div class="terminal-line"><span></span><span><span class="term-good">pasted</span> 312 chars into active text field</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="command-grid" style="margin-top: 18px;">
+            <div class="command">
+              <code>comlink record --paste</code>
+              <p>Fastest happy path: speak, stop, paste the cleaned text into the active app.</p>
+            </div>
+            <div class="command">
+              <code>comlink transcribe meeting.m4a --format md</code>
+              <p>File workflow with metadata and readable transcript output.</p>
+            </div>
+            <div class="command">
+              <code>comlink modes add prompt --instruction "Convert rough speech into a concise coding prompt."</code>
+              <p>Power-user customization without requiring a GUI.</p>
+            </div>
+            <div class="command">
+              <code>comlink privacy audit</code>
+              <p>Show installed models, retention settings, cloud endpoints, and context permissions.</p>
+            </div>
+          </div>
+        </section>
+
+        <section id="roadmap">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Build sequence</div>
+              <h2>Ship usefulness before polish, then add OS depth</h2>
+            </div>
+            <p>
+              The phases keep the MVP local and scriptable before taking on the harder parts:
+              daemon UX, global hotkeys, active paste, app context, and meeting capture.
+            </p>
+          </div>
+
+          <div class="timeline" aria-label="Build phases">
+            <article class="phase">
+              <span class="phase-num">Phase 0</span>
+              <h3>Research spike</h3>
+              <ul>
+                <li><code>comlink transcribe FILE</code></li>
+                <li><code>comlink record</code></li>
+                <li>stdout only, no history</li>
+              </ul>
+            </article>
+            <article class="phase">
+              <span class="phase-num">Phase 1</span>
+              <h3>Useful local CLI</h3>
+              <ul>
+                <li>Model management</li>
+                <li>FFmpeg and Silero VAD</li>
+                <li>Clean mode, vocab, snippets</li>
+                <li>Clipboard and SQLite</li>
+              </ul>
+            </article>
+            <article class="phase">
+              <span class="phase-num">Phase 2</span>
+              <h3>Dictation daemon</h3>
+              <ul>
+                <li>Global hotkey</li>
+                <li>Recording indicator</li>
+                <li>Copy/paste adapter</li>
+                <li>App-specific mode rules</li>
+              </ul>
+            </article>
+            <article class="phase">
+              <span class="phase-num">Phase 3</span>
+              <h3>Developer mode</h3>
+              <ul>
+                <li>Prompt and terminal modes</li>
+                <li>Selected text transforms</li>
+                <li>MCP or local HTTP server</li>
+                <li>Git-aware context</li>
+              </ul>
+            </article>
+            <article class="phase">
+              <span class="phase-num">Phase 4</span>
+              <h3>Meeting and file pro</h3>
+              <ul>
+                <li>WhisperX and diarization</li>
+                <li>System audio adapters</li>
+                <li>Notes and action extraction</li>
+                <li>Searchable transcript library</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+
+        <section id="guardrails">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Guardrails</div>
+              <h2>The product promise is local, predictable, and reversible</h2>
+            </div>
+            <p>
+              These rules should shape implementation and product copy. They are also good tests:
+              a feature that violates them needs explicit opt-in and clear UI.
+            </p>
+          </div>
+
+          <div class="rail">
+            <article class="card">
+              <span class="tag mint">Privacy</span>
+              <h3>No hidden network path</h3>
+              <p>Offline mode blocks model downloads and LLM HTTP calls. No cloud fallback without an explicit command.</p>
+            </article>
+            <article class="card">
+              <span class="tag green">Retention</span>
+              <h3>Audio off by default</h3>
+              <p>Short dictation uses temp audio and deletes it. Transcript history is a visible setting or command choice.</p>
+            </article>
+            <article class="card">
+              <span class="tag amber">Accuracy</span>
+              <h3>Never ASR silence</h3>
+              <p>VAD and minimum-duration guards prevent Whisper-like hallucinations on empty or noisy clips.</p>
+            </article>
+            <article class="card">
+              <span class="tag coral">Meaning</span>
+              <h3>LLM rewrite is optional</h3>
+              <p>Local LLMs receive text only, can be skipped with <code>--no-llm</code>, and fall back to deterministic clean text.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="questions">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Feedback needed</div>
+              <h2>Open questions before implementation hardens</h2>
+            </div>
+            <p>
+              These are the decisions most likely to change architecture, packaging, or early UX.
+            </p>
+          </div>
+
+          <div class="questions">
+            <details open>
+              <summary>1. Should the MVP be terminal-first or daemon-first?</summary>
+              <div class="question-body">
+                Terminal-first gets <code>record</code>, <code>transcribe</code>, model management,
+                and scriptable output working quickly. Daemon-first validates the Wispr-like
+                value sooner, but pulls in hotkeys, permissions, indicators, and paste complexity.
+              </div>
+            </details>
+            <details open>
+              <summary>2. Which language should anchor the core?</summary>
+              <div class="question-body">
+                Rust fits a polished cross-platform daemon and native adapters. Python/Typer fits
+                a fast research spike around ASR and VAD libraries. Go is a pragmatic middle path.
+              </div>
+            </details>
+            <details>
+              <summary>3. What is the default model and install story?</summary>
+              <div class="question-body">
+                The spec points at <code>whisper.cpp</code> plus <code>small.en</code> as a strong
+                default. We still need a decision on bundled runtime, model download verification,
+                license display, and whether English-only is acceptable initially.
+              </div>
+            </details>
+            <details>
+              <summary>4. Is transcript history on or off by default?</summary>
+              <div class="question-body">
+                History makes the product useful and debuggable, but the privacy posture is cleaner
+                with retention off until explicitly enabled. A compromise is metadata-only history
+                by default, with transcript retention opt-in.
+              </div>
+            </details>
+            <details>
+              <summary>5. How much context should comlink ever read?</summary>
+              <div class="question-body">
+                CLI context such as cwd, git branch, and flags is low risk. Selected text, clipboard,
+                app name, URL, and textbox context are valuable but should be explicit, logged, and
+                controlled by mode policy.
+              </div>
+            </details>
+            <details>
+              <summary>6. Should paste be copy-first or active-app-first?</summary>
+              <div class="question-body">
+                Clipboard copy is reliable and MVP-safe. Active paste is the product magic, but it
+                needs OS-specific adapters and failure handling. The spec recommends copy first,
+                paste in daemon mode.
+              </div>
+            </details>
+            <details>
+              <summary>7. How early should terminal/coding mode ship?</summary>
+              <div class="question-body">
+                For this project, developer dictation feels like a differentiator. It may deserve
+                to move from Phase 3 into Phase 1 as a deterministic mode that preserves symbols,
+                filenames, commands, URLs, camelCase, and snake_case.
+              </div>
+            </details>
+            <details>
+              <summary>8. What platforms matter first?</summary>
+              <div class="question-body">
+                macOS is the easiest place to start for local CLI plus clipboard and eventual
+                accessibility paste. Linux and Windows change hotkey, paste, audio, and packaging
+                constraints enough that they should be explicit roadmap choices.
+              </div>
+            </details>
+          </div>
+        </section>
+
+        <section id="sources">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Source index</div>
+              <h2>Primary references from the research</h2>
+            </div>
+            <p>
+              Full notes and the longer source list live in the markdown. These links are the
+              most important references for architecture and runtime decisions.
+            </p>
+          </div>
+
+          <div class="source-links" aria-label="Source links">
+            <a href="https://docs.wisprflow.ai/articles/2772472373-what-is-flow">Wispr Flow docs</a>
+            <a href="https://superwhisper.com/docs/modes/modes">Superwhisper modes</a>
+            <a href="https://aquavoice.com/">Aqua Voice</a>
+            <a href="https://docs.granola.ai/help-center/taking-notes/transcription">Granola transcription</a>
+            <a href="https://github.com/OpenWhispr/openwhispr">OpenWhispr</a>
+            <a href="https://github.com/beingpax/VoiceInk">VoiceInk</a>
+            <a href="https://github.com/moona3k/macparakeet">MacParakeet</a>
+            <a href="https://github.com/ggml-org/whisper.cpp">whisper.cpp</a>
+            <a href="https://github.com/snakers4/silero-vad">Silero VAD</a>
+            <a href="https://github.com/SYSTRAN/faster-whisper">faster-whisper</a>
+            <a href="https://github.com/m-bain/whisperX">WhisperX</a>
+            <a href="https://docs.ollama.com/api/introduction">Ollama API</a>
+          </div>
+        </section>
+
+        <footer class="footer">
+          Generated from <a href="local-cli-transcription-app-spec.md">docs/research/local-cli-transcription-app-spec.md</a>.
+          The original spec uses <code>vox</code> as a placeholder name; this artifact maps the product vision to <code>comlink</code>.
+        </footer>
+      </div>
+    </main>
+  </div>
+</body>
+</html>
