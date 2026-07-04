@@ -125,14 +125,25 @@ pub fn load(overrides: CliConfigOverrides) -> Result<ResolvedConfig, ComlinkErro
     let mut config = Config::default();
     let mut sources = vec!["defaults".to_string()];
 
-    if paths.config_file.exists() {
-        let file_config = read_file_config(&paths.config_file)?;
-        merge_file_config(&mut config, file_config);
-        sources.push(paths.config_file.display().to_string());
-    }
+    merge_config_file(&mut config, &paths, &mut sources)?;
 
     merge_env(&mut config, &mut sources)?;
     merge_cli_overrides(&mut config, &mut sources, overrides);
+    mark_selected_model(&mut config);
+
+    Ok(ResolvedConfig {
+        paths,
+        config,
+        sources,
+    })
+}
+
+pub fn load_persistent() -> Result<ResolvedConfig, ComlinkError> {
+    let paths = resolve_paths()?;
+    let mut config = Config::default();
+    let mut sources = vec!["defaults".to_string()];
+
+    merge_config_file(&mut config, &paths, &mut sources)?;
     mark_selected_model(&mut config);
 
     Ok(ResolvedConfig {
@@ -296,6 +307,19 @@ fn read_file_config(path: &Path) -> Result<FileConfig, ComlinkError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn merge_config_file(
+    config: &mut Config,
+    paths: &ConfigPaths,
+    sources: &mut Vec<String>,
+) -> Result<(), ComlinkError> {
+    if paths.config_file.exists() {
+        let file_config = read_file_config(&paths.config_file)?;
+        merge_file_config(config, file_config);
+        sources.push(paths.config_file.display().to_string());
+    }
+    Ok(())
 }
 
 fn merge_file_config(config: &mut Config, file: FileConfig) {
@@ -557,6 +581,41 @@ mod tests {
         assert!(text.contains("\"my signature\""));
         assert!(!text.contains("\"env\""));
         assert!(!text.contains("\"cli\""));
+    }
+
+    #[test]
+    fn load_persistent_ignores_runtime_env_model() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let config_file = dir.path().join("config.json");
+        fs::write(
+            &config_file,
+            r#"{
+              "selected_model": "file",
+              "models": [{"name": "file", "path": "/tmp/file-model.bin"}]
+            }"#,
+        )
+        .unwrap();
+
+        let previous_home = env::var_os("COMLINK_HOME");
+        let previous_model = env::var_os("COMLINK_WHISPER_MODEL");
+        env::set_var("COMLINK_HOME", dir.path());
+        env::set_var("COMLINK_WHISPER_MODEL", "/tmp/env-model.bin");
+
+        let resolved = load_persistent().unwrap();
+
+        restore_env("COMLINK_HOME", previous_home);
+        restore_env("COMLINK_WHISPER_MODEL", previous_model);
+
+        assert_eq!(resolved.config.selected_model.as_deref(), Some("file"));
+        assert_eq!(resolved.config.models.len(), 1);
+        assert_eq!(
+            selected_model_path(&resolved.config).unwrap(),
+            PathBuf::from("/tmp/file-model.bin")
+        );
+        assert!(!resolved
+            .sources
+            .contains(&"COMLINK_WHISPER_MODEL".to_string()));
     }
 
     #[test]

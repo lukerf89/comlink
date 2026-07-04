@@ -138,7 +138,7 @@ fn apply_deterministic_rules(raw_text: &str, rules: TextRules<'_>) -> String {
     let cleaned = clean_spacing(&no_fillers);
     let with_vocabulary = apply_vocabulary(&cleaned, rules.vocabulary);
     let with_snippets = apply_snippets(&with_vocabulary, rules.snippets);
-    clean_spacing(&with_snippets)
+    clean_spacing_preserving_newlines(&with_snippets)
 }
 
 fn remove_safe_fillers(raw_text: &str) -> String {
@@ -175,17 +175,21 @@ fn clean_spacing(raw_text: &str) -> String {
                 }
                 cleaned.push(ch);
             }
-            '(' | '[' | '{' => {
-                if !cleaned.is_empty() && !cleaned.ends_with(' ') {
-                    cleaned.push(' ');
-                }
-                cleaned.push(ch);
-            }
             _ => cleaned.push(ch),
         }
     }
 
     cleaned.trim().to_string()
+}
+
+fn clean_spacing_preserving_newlines(raw_text: &str) -> String {
+    raw_text
+        .split('\n')
+        .map(clean_spacing)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
 }
 
 fn apply_vocabulary(text: &str, entries: &[VocabularyEntry]) -> String {
@@ -216,6 +220,13 @@ struct PhraseReplacement<'a> {
     replacement: &'a str,
 }
 
+#[derive(Debug, Clone)]
+struct PreparedPhraseReplacement<'a> {
+    trigger: &'a str,
+    trigger_lower: String,
+    replacement: &'a str,
+}
+
 fn apply_phrase_replacements(text: &str, replacements: &[PhraseReplacement<'_>]) -> String {
     if replacements.is_empty() || text.is_empty() {
         return text.to_string();
@@ -224,7 +235,11 @@ fn apply_phrase_replacements(text: &str, replacements: &[PhraseReplacement<'_>])
     let mut ordered = replacements
         .iter()
         .filter(|replacement| !replacement.trigger.trim().is_empty())
-        .copied()
+        .map(|replacement| PreparedPhraseReplacement {
+            trigger: replacement.trigger,
+            trigger_lower: replacement.trigger.to_ascii_lowercase(),
+            replacement: replacement.replacement,
+        })
         .collect::<Vec<_>>();
     ordered.sort_by(|a, b| {
         b.trigger
@@ -240,8 +255,8 @@ fn apply_phrase_replacements(text: &str, replacements: &[PhraseReplacement<'_>])
     while index < text.len() {
         let mut matched = None;
         for replacement in &ordered {
-            if phrase_matches(text, &lowered, index, replacement.trigger) {
-                matched = Some(*replacement);
+            if phrase_matches(text, &lowered, index, &replacement.trigger_lower) {
+                matched = Some(replacement);
                 break;
             }
         }
@@ -259,18 +274,18 @@ fn apply_phrase_replacements(text: &str, replacements: &[PhraseReplacement<'_>])
     output
 }
 
-fn phrase_matches(text: &str, lowered: &str, index: usize, trigger: &str) -> bool {
-    if !text.is_char_boundary(index) || index + trigger.len() > text.len() {
+fn phrase_matches(text: &str, lowered: &str, index: usize, trigger_lower: &str) -> bool {
+    let end = index + trigger_lower.len();
+    if !text.is_char_boundary(index) || end > text.len() || !text.is_char_boundary(end) {
         return false;
     }
 
-    let trigger_lower = trigger.to_ascii_lowercase();
-    if &lowered[index..index + trigger.len()] != trigger_lower.as_str() {
+    if &lowered[index..end] != trigger_lower {
         return false;
     }
 
     let before = text[..index].chars().next_back();
-    let after = text[index + trigger.len()..].chars().next();
+    let after = text[end..].chars().next();
     is_phrase_boundary(before) && is_phrase_boundary(after)
 }
 
@@ -351,17 +366,30 @@ mod tests {
 
         assert_eq!(
             TextMode::Clean.process("thanks my signature", rules(&[], &snippets)),
-            "thanks Best, Luke"
+            "thanks Best,\nLuke"
         );
     }
 
     #[test]
     fn coding_prompt_preserves_code_like_tokens() {
-        let raw = "uh update src/main.rs then run cargo test --all and keep camelCase snake_case https://example.com/api";
+        let raw = "uh keep fn(arg) arr[i] map {key: value} [text](url) src/main.rs cargo test --all camelCase snake_case https://example.com/api";
 
         assert_eq!(
             TextMode::CodingPrompt.process(raw, TextRules::default()),
-            "update src/main.rs then run cargo test --all and keep camelCase snake_case https://example.com/api."
+            "keep fn(arg) arr[i] map {key: value} [text](url) src/main.rs cargo test --all camelCase snake_case https://example.com/api."
+        );
+    }
+
+    #[test]
+    fn phrase_matching_handles_non_ascii_char_boundaries() {
+        let vocabulary = vec![VocabularyEntry {
+            phrase: "cafe".to_string(),
+            replacement: "Cafe".to_string(),
+        }];
+
+        assert_eq!(
+            TextMode::Clean.process("café", rules(&vocabulary, &[])),
+            "café"
         );
     }
 

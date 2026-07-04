@@ -485,19 +485,23 @@ fn run_modes(command: ModesCommand) -> Result<(), ComlinkError> {
 }
 
 fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
-    let mut resolved = config::load(CliConfigOverrides::default())?;
     match command {
         VocabCommand::Add {
             phrase,
             replacement,
         } => {
+            let mut resolved = config::load_persistent()?;
             config::upsert_vocabulary(&mut resolved.config, phrase.clone(), replacement.clone());
             config::save(&resolved.paths, &resolved.config)?;
             println!("{phrase} -> {replacement}");
             Ok(())
         }
-        VocabCommand::List { format } => print_vocabulary(&resolved.config.vocabulary, format),
+        VocabCommand::List { format } => {
+            let resolved = config::load(CliConfigOverrides::default())?;
+            print_vocabulary(&resolved.config.vocabulary, format)
+        }
         VocabCommand::Remove { phrase } => {
+            let mut resolved = config::load_persistent()?;
             if !config::remove_vocabulary(&mut resolved.config, &phrase) {
                 return Err(ComlinkError::NotFound {
                     kind: "vocabulary",
@@ -512,17 +516,21 @@ fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
 }
 
 fn run_snippets(command: SnippetsCommand) -> Result<(), ComlinkError> {
-    let mut resolved = config::load(CliConfigOverrides::default())?;
     match command {
         SnippetsCommand::Add { trigger, body } => {
+            let mut resolved = config::load_persistent()?;
             let body = decode_cli_newlines(&body);
             config::upsert_snippet(&mut resolved.config, trigger.clone(), body);
             config::save(&resolved.paths, &resolved.config)?;
             println!("saved snippet: {trigger}");
             Ok(())
         }
-        SnippetsCommand::List { format } => print_snippets(&resolved.config.snippets, format),
+        SnippetsCommand::List { format } => {
+            let resolved = config::load(CliConfigOverrides::default())?;
+            print_snippets(&resolved.config.snippets, format)
+        }
         SnippetsCommand::Remove { trigger } => {
+            let mut resolved = config::load_persistent()?;
             if !config::remove_snippet(&mut resolved.config, &trigger) {
                 return Err(ComlinkError::NotFound {
                     kind: "snippet",
