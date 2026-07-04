@@ -300,6 +300,12 @@ Manual pause gate:
 - User confirms the default retention posture is acceptable for build-out.
 - User approves the data model before work modes depend on it.
 
+Manual acceptance:
+
+- Passed on 2026-07-04. Real microphone recording and clipboard delivery still work after Phase 2.
+- Config, privacy audit, model registry persistence, runtime env override behavior, saved history, transcript-retention-off behavior, and `history prune --all` were manually verified.
+- Audio retention default-off posture was verified; retained audio pruning remains covered by automated storage tests.
+
 Phase completion artifact:
 
 - `docs/validation/phase-2.md`
@@ -708,7 +714,7 @@ Phase completion artifact:
 | --- | --- | --- |
 | 0 | File transcription works locally | `doctor`, text output, JSON output, temp cleanup |
 | 1 | User records and copies a memo | Mic capture, no-speech guard, JSON, clipboard |
-| 2 | User approves config/history/privacy | Retention toggles, history, privacy audit |
+| 2 | Passed 2026-07-04: user approved config/history/privacy | Retention toggles, history, privacy audit |
 | 3 | User approves deterministic work modes | Raw preserved, vocab/snippets, coding syntax preserved |
 | 4 | User approves schema v1 | JSON/JSONL/MD, exit codes, stdout/stderr contract |
 | 5 | User approves local style/rewrite behavior | LLM optional, fallback safe, no invented facts |

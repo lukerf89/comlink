@@ -77,6 +77,30 @@ Ran `scripts/e2e/phase-2-config-storage-privacy.sh`. It:
 - Cloud endpoints remain out of scope; `privacy audit` reports LLM status as disabled.
 - Audio retention is implemented but defaults off and was not exercised in the E2E script beyond verifying the default posture.
 
+## Manual Test Results
+
+Manual testing passed on 2026-07-04.
+
+Commands and checks covered:
+
+- `cargo run -- record --mode memo --format json` captured microphone audio and emitted the expected JSON contract.
+- `cargo run -- record --mode memo --copy --format text` copied the final memo text to the clipboard.
+- `cargo run -- config show --format json` exposed the macOS config, data, database, and audio paths.
+- `cargo run -- privacy audit --format json` showed history enabled, metadata/transcript retention on, audio retention off, the selected local model path, local ASR, and disabled LLM posture.
+- `cargo run -- models select tiny --path "$HOME/Library/Caches/comlink/models/ggml-tiny.en.bin"` registered the real local model.
+- `env -u COMLINK_WHISPER_MODEL cargo run -- models list --format json` confirmed the saved `tiny` model was selected and the transient `env` model was not persisted.
+- `cargo run -- transcribe tests/fixtures/audio/short.wav --mode memo --format json --save` created a saved history session.
+- `cargo run -- history list --format json` showed the saved session with transcript text retained by default.
+- `COMLINK_RETAIN_TRANSCRIPTS=false cargo run -- transcribe tests/fixtures/audio/short.wav --mode memo --format json --save` created a second saved session with transcript retention disabled.
+- `cargo run -- history show s1783201099598364000-4071-0 --format json` showed `raw_text`, `final_text`, and segment `text` as `null`, while source metadata remained available.
+- `cargo run -- history prune --all --format json` deleted the remaining saved session and segment.
+
+Manual observations:
+
+- Real microphone stop-to-final latency remained in the same range as Phase 1: 388 ms for JSON output and 431 ms for clipboard output.
+- The tiny model still transcribed the spoken phrase as `MemoTest` and `Superbase`; this is a model quality limitation, not a Phase 2 storage/privacy regression.
+- `history prune --all` reported `audio_files_deleted: 0` during manual testing because audio retention was off, which is the default posture.
+
 ## Manual Test Script
 
 1. Inspect resolved paths and defaults:
