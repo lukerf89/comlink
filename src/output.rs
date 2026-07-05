@@ -11,7 +11,8 @@ use crate::{
     asr::{Segment, SourceMetadata, Transcript},
     config::Config,
     error::ComlinkError,
-    text::{TextMode, TextRules},
+    llm::{self, LlmRewriteRecord, RewriteInput},
+    text::{self, TextRules},
 };
 
 pub const SCHEMA_VERSION: &str = "comlink.session.v1";
@@ -52,7 +53,7 @@ pub struct TranscriptOutput {
     pub text: String,
     pub raw_text: String,
     pub final_text: String,
-    pub mode: TextMode,
+    pub mode: String,
     pub copied: bool,
     pub engine: String,
     pub model: String,
@@ -61,6 +62,9 @@ pub struct TranscriptOutput {
     pub source: SourceMetadata,
     pub context: ContextMetadata,
     pub processing_steps: Vec<ProcessingStep>,
+    pub warnings: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm: Option<LlmRewriteRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub history_session_id: Option<String>,
 }
@@ -68,26 +72,21 @@ pub struct TranscriptOutput {
 impl TranscriptOutput {
     pub fn from_transcript(
         transcript: Transcript,
-        mode: TextMode,
+        mode: &str,
         copied: bool,
         config: &Config,
-    ) -> Self {
+        no_llm: bool,
+    ) -> Result<Self, ComlinkError> {
         let raw_text = transcript.text;
-        let final_text = mode.process(
-            &raw_text,
-            TextRules {
-                vocabulary: &config.vocabulary,
-                snippets: &config.snippets,
-            },
-        );
+        let processed = process_text(&raw_text, mode, config, no_llm)?;
 
-        Self {
+        Ok(Self {
             schema_version: SCHEMA_VERSION.to_string(),
             session_id: new_session_id(),
-            text: final_text.clone(),
+            text: processed.final_text.clone(),
             raw_text,
-            final_text,
-            mode,
+            final_text: processed.final_text,
+            mode: processed.mode,
             copied,
             engine: transcript.engine,
             model: transcript.model,
@@ -95,16 +94,87 @@ impl TranscriptOutput {
             segments: transcript.segments,
             source: transcript.source,
             context: ContextMetadata::default(),
-            processing_steps: mode
-                .processing_steps()
-                .into_iter()
-                .map(|step| ProcessingStep {
-                    name: step.to_string(),
-                })
-                .collect(),
+            processing_steps: processed.processing_steps,
+            warnings: processed.warnings,
+            llm: processed.llm,
             history_session_id: None,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct TextProcessingResult {
+    pub mode: String,
+    pub final_text: String,
+    pub processing_steps: Vec<ProcessingStep>,
+    pub warnings: Vec<String>,
+    pub llm: Option<LlmRewriteRecord>,
+}
+
+pub fn process_text(
+    raw_text: &str,
+    mode: &str,
+    config: &Config,
+    no_llm: bool,
+) -> Result<TextProcessingResult, ComlinkError> {
+    let mode = text::resolve_mode(config, mode)
+        .ok_or_else(|| ComlinkError::ModeNotFound(mode.to_string()))?;
+    let deterministic_text = mode.process_deterministic(
+        raw_text,
+        TextRules {
+            vocabulary: &config.vocabulary,
+            snippets: &config.snippets,
+        },
+    );
+    let mut final_text = deterministic_text.clone();
+    let mut warnings = Vec::new();
+    let mut processing_steps = mode
+        .processing_steps()
+        .into_iter()
+        .map(|step| ProcessingStep { name: step })
+        .collect::<Vec<_>>();
+    let mut llm_record = None;
+
+    if let Some(instruction) = mode.llm_instruction.as_deref() {
+        if no_llm {
+            llm_record = Some(llm::skipped_record("--no-llm was set"));
+        } else {
+            match llm::rewrite(
+                &config.llm,
+                RewriteInput {
+                    mode: &mode.name,
+                    text: &deterministic_text,
+                    instruction,
+                    profile: mode.style_profile,
+                },
+            ) {
+                Ok(success) => {
+                    final_text = success.text;
+                    processing_steps.push(ProcessingStep {
+                        name: "llm-rewrite".to_string(),
+                    });
+                    llm_record = Some(success.record);
+                }
+                Err(record) => {
+                    let record = *record;
+                    let warning = record
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "local LLM rewrite failed".to_string());
+                    warnings.push(format!("local LLM rewrite unavailable: {warning}"));
+                    llm_record = Some(record);
+                }
+            }
         }
     }
+
+    Ok(TextProcessingResult {
+        mode: mode.name,
+        final_text,
+        processing_steps,
+        warnings,
+        llm: llm_record,
+    })
 }
 
 pub fn print_transcript(
@@ -142,7 +212,7 @@ fn print_jsonl(transcript: &TranscriptOutput) -> Result<(), ComlinkError> {
         record_type: "session",
         schema_version: &transcript.schema_version,
         session_id: &transcript.session_id,
-        mode: transcript.mode,
+        mode: &transcript.mode,
         engine: &transcript.engine,
         model: &transcript.model,
         duration_ms: transcript.duration_ms,
@@ -151,6 +221,8 @@ fn print_jsonl(transcript: &TranscriptOutput) -> Result<(), ComlinkError> {
         copied: transcript.copied,
         history_session_id: transcript.history_session_id.as_deref(),
         processing_steps: &transcript.processing_steps,
+        warnings: &transcript.warnings,
+        llm: transcript.llm.as_ref(),
     };
     println!("{}", serde_json::to_string(&metadata)?);
 
@@ -172,7 +244,7 @@ fn print_jsonl(transcript: &TranscriptOutput) -> Result<(), ComlinkError> {
         text: &transcript.text,
         raw_text: &transcript.raw_text,
         final_text: &transcript.final_text,
-        mode: transcript.mode,
+        mode: &transcript.mode,
         copied: transcript.copied,
         engine: &transcript.engine,
         model: &transcript.model,
@@ -180,6 +252,8 @@ fn print_jsonl(transcript: &TranscriptOutput) -> Result<(), ComlinkError> {
         source: &transcript.source,
         context: &transcript.context,
         processing_steps: &transcript.processing_steps,
+        warnings: &transcript.warnings,
+        llm: transcript.llm.as_ref(),
         history_session_id: transcript.history_session_id.as_deref(),
     };
     println!("{}", serde_json::to_string(&final_record)?);
@@ -195,7 +269,7 @@ pub fn render_markdown(transcript: &TranscriptOutput) -> String {
     if let Some(id) = &transcript.history_session_id {
         push_field(&mut markdown, "History session", id);
     }
-    push_field(&mut markdown, "Mode", transcript.mode.as_str());
+    push_field(&mut markdown, "Mode", &transcript.mode);
     push_field(&mut markdown, "Engine", &transcript.engine);
     push_field(&mut markdown, "Model", &transcript.model);
     push_field(
@@ -213,12 +287,22 @@ pub fn render_markdown(transcript: &TranscriptOutput) -> String {
         ),
     );
     push_field(&mut markdown, "Context policy", &transcript.context.policy);
+    if let Some(llm) = &transcript.llm {
+        push_field(&mut markdown, "LLM rewrite", &llm.status);
+    }
     markdown.push('\n');
 
     markdown.push_str("## Final Text\n\n");
     markdown.push_str(&transcript.final_text);
     markdown.push_str("\n\n## Raw Text\n\n");
     markdown.push_str(&transcript.raw_text);
+
+    if !transcript.warnings.is_empty() {
+        markdown.push_str("\n\n## Warnings\n\n");
+        for warning in &transcript.warnings {
+            markdown.push_str(&format!("- {warning}\n"));
+        }
+    }
 
     if !transcript.segments.is_empty() {
         markdown.push_str("\n\n## Segments\n\n");
@@ -242,7 +326,7 @@ struct JsonlSessionRecord<'a> {
     record_type: &'static str,
     schema_version: &'a str,
     session_id: &'a str,
-    mode: TextMode,
+    mode: &'a str,
     engine: &'a str,
     model: &'a str,
     duration_ms: u64,
@@ -251,6 +335,8 @@ struct JsonlSessionRecord<'a> {
     copied: bool,
     history_session_id: Option<&'a str>,
     processing_steps: &'a [ProcessingStep],
+    warnings: &'a [String],
+    llm: Option<&'a LlmRewriteRecord>,
 }
 
 #[derive(Debug, Serialize)]
@@ -270,7 +356,7 @@ struct JsonlTranscriptRecord<'a> {
     text: &'a str,
     raw_text: &'a str,
     final_text: &'a str,
-    mode: TextMode,
+    mode: &'a str,
     copied: bool,
     engine: &'a str,
     model: &'a str,
@@ -278,12 +364,17 @@ struct JsonlTranscriptRecord<'a> {
     source: &'a SourceMetadata,
     context: &'a ContextMetadata,
     processing_steps: &'a [ProcessingStep],
+    warnings: &'a [String],
+    llm: Option<&'a LlmRewriteRecord>,
     history_session_id: Option<&'a str>,
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::asr::{Segment, SourceMetadata};
+    use crate::{
+        asr::{Segment, SourceMetadata},
+        text::TextMode,
+    };
 
     use super::*;
 
@@ -307,10 +398,12 @@ mod tests {
         };
         let transcript = TranscriptOutput::from_transcript(
             transcript,
-            TextMode::Memo,
+            TextMode::Memo.as_str(),
             true,
             &Default::default(),
-        );
+            false,
+        )
+        .unwrap();
 
         let json = serde_json::to_value(&transcript).unwrap();
         assert_eq!(json["schema_version"], SCHEMA_VERSION);
@@ -347,10 +440,12 @@ mod tests {
                     normalized_channels: 1,
                 },
             },
-            TextMode::Raw,
+            TextMode::Raw.as_str(),
             false,
             &Default::default(),
-        );
+            false,
+        )
+        .unwrap();
 
         let markdown = render_markdown(&transcript);
 
@@ -379,10 +474,12 @@ mod tests {
                     normalized_channels: 1,
                 },
             },
-            TextMode::Raw,
+            TextMode::Raw.as_str(),
             false,
             &Default::default(),
-        );
+            false,
+        )
+        .unwrap();
 
         let record = JsonlTranscriptRecord {
             record_type: "transcript",
@@ -391,7 +488,7 @@ mod tests {
             text: &transcript.text,
             raw_text: &transcript.raw_text,
             final_text: &transcript.final_text,
-            mode: transcript.mode,
+            mode: &transcript.mode,
             copied: transcript.copied,
             engine: &transcript.engine,
             model: &transcript.model,
@@ -399,6 +496,8 @@ mod tests {
             source: &transcript.source,
             context: &transcript.context,
             processing_steps: &transcript.processing_steps,
+            warnings: &transcript.warnings,
+            llm: transcript.llm.as_ref(),
             history_session_id: transcript.history_session_id.as_deref(),
         };
 

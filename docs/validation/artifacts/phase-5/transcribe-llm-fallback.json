@@ -1,0 +1,64 @@
+{
+  "schema_version": "comlink.session.v1",
+  "session_id": "s1783221489102669000-5510-0",
+  "text": "turn this into Supabase prompt.",
+  "raw_text": "um turn this into super base prompt .",
+  "final_text": "turn this into Supabase prompt.",
+  "mode": "prompt",
+  "copied": false,
+  "engine": "whisper.cpp",
+  "model": "/private<tmp>/mock-model.bin",
+  "duration_ms": 2080,
+  "segments": [
+    {
+      "start_ms": 0,
+      "end_ms": 2080,
+      "text": "um turn this into super base prompt ."
+    }
+  ],
+  "source": {
+    "path": "<repo>/tests/fixtures/audio/short.wav",
+    "normalized_sample_rate_hz": 16000,
+    "normalized_channels": 1
+  },
+  "context": {
+    "policy": "none",
+    "items": []
+  },
+  "processing_steps": [
+    {
+      "name": "deterministic-cleanup"
+    },
+    {
+      "name": "vocabulary"
+    },
+    {
+      "name": "snippets"
+    },
+    {
+      "name": "memo-mode"
+    },
+    {
+      "name": "prompt-mode"
+    }
+  ],
+  "warnings": [
+    "local LLM rewrite unavailable: LLM connection failed: Connection refused (os error 61)"
+  ],
+  "llm": {
+    "attempted": true,
+    "status": "fallback",
+    "request": {
+      "provider": "ollama",
+      "endpoint": "http://127.0.0.1:61890/api/generate",
+      "model": "fake-local",
+      "mode": "prompt",
+      "input_kind": "text",
+      "input_bytes": 31,
+      "context_policy": "text-only; no audio; no external context",
+      "instruction": "Convert rough dictation into a concise coding prompt. Preserve facts and technical terms.",
+      "style_profile": "concise"
+    },
+    "error": "LLM connection failed: Connection refused (os error 61)"
+  }
+}
