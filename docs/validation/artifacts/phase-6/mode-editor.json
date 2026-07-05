@@ -1,0 +1,11 @@
+{
+  "raw_text": "first line new line second line",
+  "final_text": "first line\nsecond line.",
+  "mode": "editor",
+  "processing_steps": [
+    "deterministic-cleanup",
+    "vocabulary",
+    "snippets",
+    "editor-formatting-preset"
+  ]
+}

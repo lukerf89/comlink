@@ -1,0 +1,11 @@
+{
+  "raw_text": "um cargo test --all . new line git status --short .",
+  "final_text": "cargo test --all && git status --short",
+  "mode": "terminal",
+  "processing_steps": [
+    "deterministic-cleanup",
+    "vocabulary",
+    "snippets",
+    "terminal-formatting-preset"
+  ]
+}

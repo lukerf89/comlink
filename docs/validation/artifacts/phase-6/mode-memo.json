@@ -1,0 +1,11 @@
+{
+  "raw_text": "phase six memo",
+  "final_text": "phase six memo.",
+  "mode": "memo",
+  "processing_steps": [
+    "deterministic-cleanup",
+    "vocabulary",
+    "snippets",
+    "memo-mode"
+  ]
+}

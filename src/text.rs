@@ -11,6 +11,10 @@ pub enum TextMode {
     CodingPrompt,
     EmailReply,
     SlackReply,
+    Terminal,
+    Editor,
+    Outlook,
+    Slack,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -41,6 +45,10 @@ impl TextMode {
             "coding-prompt" => Some(Self::CodingPrompt),
             "email-reply" => Some(Self::EmailReply),
             "slack-reply" => Some(Self::SlackReply),
+            "terminal" => Some(Self::Terminal),
+            "editor" => Some(Self::Editor),
+            "outlook" => Some(Self::Outlook),
+            "slack" => Some(Self::Slack),
             _ => None,
         }
     }
@@ -53,6 +61,10 @@ impl TextMode {
             Self::CodingPrompt => "coding-prompt",
             Self::EmailReply => "email-reply",
             Self::SlackReply => "slack-reply",
+            Self::Terminal => "terminal",
+            Self::Editor => "editor",
+            Self::Outlook => "outlook",
+            Self::Slack => "slack",
         }
     }
 
@@ -64,6 +76,10 @@ impl TextMode {
                 apply_sentence_end_mode(raw_text, rules)
             }
             Self::SlackReply => apply_slack_reply_mode(raw_text, rules),
+            Self::Terminal => apply_terminal_mode(raw_text, rules),
+            Self::Editor => apply_editor_mode(raw_text, rules),
+            Self::Outlook => apply_outlook_mode(raw_text, rules),
+            Self::Slack => apply_slack_mode(raw_text, rules),
         }
     }
 
@@ -94,6 +110,30 @@ impl TextMode {
                 "vocabulary",
                 "snippets",
                 "slack-reply-mode",
+            ],
+            Self::Terminal => vec![
+                "deterministic-cleanup",
+                "vocabulary",
+                "snippets",
+                "terminal-formatting-preset",
+            ],
+            Self::Editor => vec![
+                "deterministic-cleanup",
+                "vocabulary",
+                "snippets",
+                "editor-formatting-preset",
+            ],
+            Self::Outlook => vec![
+                "deterministic-cleanup",
+                "vocabulary",
+                "snippets",
+                "outlook-formatting-preset",
+            ],
+            Self::Slack => vec![
+                "deterministic-cleanup",
+                "vocabulary",
+                "snippets",
+                "slack-formatting-preset",
             ],
         }
     }
@@ -258,6 +298,43 @@ fn builtin_mode_registry() -> Vec<ModeDefinition> {
             llm_instruction: None,
             style_profile: None,
         },
+        ModeDefinition {
+            name: TextMode::Terminal.as_str().to_string(),
+            description:
+                "Single-line command or agent prompt text without trailing sentence punctuation."
+                    .to_string(),
+            deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
+        },
+        ModeDefinition {
+            name: TextMode::Editor.as_str().to_string(),
+            description:
+                "Editor-safe prose that honors dictated new lines and preserves technical tokens."
+                    .to_string(),
+            deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
+        },
+        ModeDefinition {
+            name: TextMode::Outlook.as_str().to_string(),
+            description: "Email-composer text with paragraph-friendly dictated layout.".to_string(),
+            deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
+        },
+        ModeDefinition {
+            name: TextMode::Slack.as_str().to_string(),
+            description: "Chat-composer text that stays concise and avoids extra punctuation."
+                .to_string(),
+            deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
+        },
     ]
 }
 
@@ -281,6 +358,14 @@ fn builtin_description(name: &str) -> Option<&'static str> {
         }
         "email-reply" => Some("Clean an email reply while keeping the user's wording."),
         "slack-reply" => Some("Clean a concise chat reply while keeping the user's wording."),
+        "terminal" => {
+            Some("Single-line command or agent prompt text without trailing sentence punctuation.")
+        }
+        "editor" => {
+            Some("Editor-safe prose that honors dictated new lines and preserves technical tokens.")
+        }
+        "outlook" => Some("Email-composer text with paragraph-friendly dictated layout."),
+        "slack" => Some("Chat-composer text that stays concise and avoids extra punctuation."),
         _ => None,
     }
 }
@@ -291,6 +376,32 @@ fn apply_sentence_end_mode(raw_text: &str, rules: TextRules<'_>) -> String {
 
 fn apply_slack_reply_mode(raw_text: &str, rules: TextRules<'_>) -> String {
     apply_deterministic_rules(raw_text, rules)
+}
+
+fn apply_terminal_mode(raw_text: &str, rules: TextRules<'_>) -> String {
+    let laid_out = apply_spoken_layout(&apply_deterministic_rules(raw_text, rules));
+    laid_out
+        .lines()
+        .map(strip_trailing_terminal_punctuation)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
+
+fn apply_editor_mode(raw_text: &str, rules: TextRules<'_>) -> String {
+    ensure_sentence_end(&apply_spoken_layout(&apply_deterministic_rules(
+        raw_text, rules,
+    )))
+}
+
+fn apply_outlook_mode(raw_text: &str, rules: TextRules<'_>) -> String {
+    ensure_sentence_end(&apply_spoken_layout(&apply_deterministic_rules(
+        raw_text, rules,
+    )))
+}
+
+fn apply_slack_mode(raw_text: &str, rules: TextRules<'_>) -> String {
+    apply_deterministic_rules(raw_text, rules).replace('\n', " ")
 }
 
 fn apply_deterministic_rules(raw_text: &str, rules: TextRules<'_>) -> String {
@@ -350,6 +461,22 @@ fn clean_spacing_preserving_newlines(raw_text: &str) -> String {
         .join("\n")
         .trim()
         .to_string()
+}
+
+fn apply_spoken_layout(text: &str) -> String {
+    let with_paragraphs = replace_phrase_case_insensitive(text, "new paragraph", "\n\n");
+    let with_lines = replace_phrase_case_insensitive(&with_paragraphs, "new line", "\n");
+    clean_spacing_preserving_newlines(&with_lines)
+}
+
+fn replace_phrase_case_insensitive(text: &str, phrase: &str, replacement: &str) -> String {
+    apply_phrase_replacements(
+        text,
+        &[PhraseReplacement {
+            trigger: phrase,
+            replacement,
+        }],
+    )
 }
 
 fn apply_vocabulary(text: &str, entries: &[VocabularyEntry]) -> String {
@@ -468,6 +595,19 @@ fn ensure_sentence_end(text: &str) -> String {
     }
 }
 
+fn strip_trailing_terminal_punctuation(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.ends_with('.')
+        || trimmed.ends_with(',')
+        || trimmed.ends_with(';')
+        || trimmed.ends_with(':')
+    {
+        trimmed[..trimmed.len() - 1].trim_end().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -556,8 +696,46 @@ mod tests {
     #[test]
     fn mode_registry_lists_all_builtin_modes() {
         let modes = mode_registry(&Default::default());
-        assert_eq!(modes.len(), 6);
+        assert_eq!(modes.len(), 10);
         assert!(modes.iter().any(|mode| mode.name == "coding-prompt"));
+        assert!(modes.iter().any(|mode| mode.name == "terminal"));
+    }
+
+    #[test]
+    fn terminal_mode_keeps_command_text_single_line_without_added_period() {
+        assert_eq!(
+            TextMode::Terminal.process(
+                "uh cargo test --all . new line then git status --short .",
+                TextRules::default()
+            ),
+            "cargo test --all && then git status --short"
+        );
+    }
+
+    #[test]
+    fn editor_and_outlook_modes_honor_dictated_layout() {
+        assert_eq!(
+            TextMode::Editor.process("first line new line second line", TextRules::default()),
+            "first line\nsecond line."
+        );
+        assert_eq!(
+            TextMode::Outlook.process(
+                "thanks for sending this new paragraph I can review today",
+                TextRules::default()
+            ),
+            "thanks for sending this\n\nI can review today."
+        );
+    }
+
+    #[test]
+    fn slack_mode_is_available_as_work_surface_alias() {
+        assert_eq!(
+            TextMode::parse("slack").unwrap().process(
+                "uh sounds good , I will check after standup",
+                TextRules::default()
+            ),
+            "sounds good, I will check after standup"
+        );
     }
 
     #[test]

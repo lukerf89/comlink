@@ -1,0 +1,2 @@
+Recording... press Enter to stop.
+error: clipboard delivery failed: failed to start <tmp>/missing-pbcopy: No such file or directory (os error 2)

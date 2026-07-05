@@ -31,7 +31,11 @@ pub struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Check local runtime dependencies and model configuration.
-    Doctor,
+    Doctor {
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: ConfigFormat,
+    },
 
     /// Inspect resolved local configuration.
     Config {
@@ -120,6 +124,10 @@ enum Command {
         /// Copy final text to the macOS clipboard.
         #[arg(long)]
         copy: bool,
+
+        /// Restore the previous clipboard after a successful copy. Requires --copy.
+        #[arg(long, requires = "copy")]
+        restore_clipboard: bool,
 
         /// whisper.cpp ggml model path. Defaults to COMLINK_WHISPER_MODEL.
         #[arg(long)]
@@ -341,8 +349,8 @@ pub fn run() -> Result<(), ComlinkError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Doctor => {
-            let healthy = doctor::run();
+        Command::Doctor { format } => {
+            let healthy = doctor::run(format)?;
             if healthy {
                 Ok(())
             } else {
@@ -371,6 +379,7 @@ pub fn run() -> Result<(), ComlinkError> {
             format,
             mode,
             copy,
+            restore_clipboard,
             model,
             min_duration_ms,
             device,
@@ -380,6 +389,7 @@ pub fn run() -> Result<(), ComlinkError> {
             format,
             mode: &mode,
             copy,
+            restore_clipboard,
             model,
             min_duration_ms,
             device,
@@ -429,6 +439,7 @@ struct RecordMemoOptions<'a> {
     format: OutputFormat,
     mode: &'a str,
     copy: bool,
+    restore_clipboard: bool,
     model: Option<PathBuf>,
     min_duration_ms: u64,
     device: Option<String>,
@@ -441,6 +452,7 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
         format,
         mode,
         copy,
+        restore_clipboard,
         model,
         min_duration_ms,
         device,
@@ -491,8 +503,17 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
     let stop_to_final_ms = captured.stopped_at.elapsed().as_millis();
 
     if copy {
-        clipboard::copy_text(&transcript.final_text)?;
-        eprintln!("Copied final text to clipboard.");
+        let copy_result = clipboard::copy_text_with_options(
+            &transcript.final_text,
+            clipboard::CopyOptions {
+                restore_previous: restore_clipboard,
+            },
+        )?;
+        if copy_result.restored_previous {
+            eprintln!("Copied final text to clipboard, then restored previous clipboard.");
+        } else {
+            eprintln!("Copied final text to clipboard.");
+        }
     }
 
     maybe_save_transcript(&resolved, &mut transcript, save, Some(&captured.path))?;
