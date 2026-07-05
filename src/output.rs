@@ -127,7 +127,7 @@ pub fn process_text(
         },
     );
     let mut final_text = deterministic_text.clone();
-    let mut warnings = Vec::new();
+    let mut warnings = mode.warnings.clone();
     let mut processing_steps = mode
         .processing_steps()
         .into_iter()
@@ -373,6 +373,7 @@ struct JsonlTranscriptRecord<'a> {
 mod tests {
     use crate::{
         asr::{Segment, SourceMetadata},
+        config::{Config, ModeEntry},
         text::TextMode,
     };
 
@@ -505,5 +506,23 @@ mod tests {
         assert_eq!(json["record_type"], "transcript");
         assert_eq!(json["final_text"], "hello");
         assert!(json.get("segments").is_none());
+    }
+
+    #[test]
+    fn process_text_surfaces_mode_configuration_warnings() {
+        let mut config = Config::default();
+        config.modes.push(ModeEntry {
+            name: "prompt".to_string(),
+            description: None,
+            deterministic_mode: Some("clean".to_string()),
+            llm_instruction: Some("Rewrite as a prompt".to_string()),
+            style_profile: Some("missing".to_string()),
+        });
+
+        let processed = process_text("hello", "prompt", &config, true).unwrap();
+
+        assert_eq!(processed.final_text, "hello");
+        assert_eq!(processed.warnings.len(), 1);
+        assert!(processed.warnings[0].contains("missing style profile"));
     }
 }

@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Write},
-    net::TcpStream,
+    net::{IpAddr, Ipv6Addr, TcpStream},
     time::Duration,
 };
 
@@ -163,9 +163,8 @@ fn system_prompt(instruction: &str, profile: Option<&StyleProfile>) -> String {
 
 fn post_json(endpoint: &str, body: &str, timeout_ms: u64) -> Result<String, String> {
     let endpoint = parse_http_endpoint(endpoint)?;
-    let address = format!("{}:{}", endpoint.host, endpoint.port);
-    let mut stream =
-        TcpStream::connect(address).map_err(|error| format!("LLM connection failed: {error}"))?;
+    let mut stream = TcpStream::connect(endpoint.socket_address())
+        .map_err(|error| format!("LLM connection failed: {error}"))?;
     let timeout = Duration::from_millis(timeout_ms.max(1));
     stream
         .set_read_timeout(Some(timeout))
@@ -177,13 +176,15 @@ fn post_json(endpoint: &str, body: &str, timeout_ms: u64) -> Result<String, Stri
     let request = format!(
         "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         endpoint.path,
-        endpoint.host,
+        endpoint.host_header(),
         body.len()
     );
     stream
         .write_all(request.as_bytes())
         .map_err(|error| format!("LLM request failed: {error}"))?;
 
+    // This minimal local client relies on Content-Length or connection close; chunked responses
+    // intentionally fall through to JSON parsing fallback instead of adding a full HTTP stack.
     let mut response = String::new();
     stream
         .read_to_string(&mut response)
@@ -209,6 +210,20 @@ struct HttpEndpoint {
     path: String,
 }
 
+impl HttpEndpoint {
+    fn socket_address(&self) -> String {
+        format!("{}:{}", bracket_ipv6_host(&self.host), self.port)
+    }
+
+    fn host_header(&self) -> String {
+        if self.port == 80 {
+            bracket_ipv6_host(&self.host)
+        } else {
+            format!("{}:{}", bracket_ipv6_host(&self.host), self.port)
+        }
+    }
+}
+
 fn parse_http_endpoint(endpoint: &str) -> Result<HttpEndpoint, String> {
     let rest = endpoint
         .strip_prefix("http://")
@@ -217,22 +232,69 @@ fn parse_http_endpoint(endpoint: &str) -> Result<HttpEndpoint, String> {
     if authority.is_empty() {
         return Err("LLM endpoint is missing a host".to_string());
     }
-    let (host, port) = if let Some((host, port)) = authority.rsplit_once(':') {
-        let port = port
-            .parse::<u16>()
-            .map_err(|_| "LLM endpoint port is invalid".to_string())?;
-        (host, port)
-    } else {
-        (authority, 80)
-    };
+    let (host, port) = parse_authority(authority)?;
     if host.is_empty() {
         return Err("LLM endpoint is missing a host".to_string());
     }
+    if !is_local_host(&host) {
+        return Err(format!(
+            "LLM endpoint host must be local-only; rejected {host}"
+        ));
+    }
     Ok(HttpEndpoint {
-        host: host.to_string(),
+        host,
         port,
         path: format!("/{path}"),
     })
+}
+
+fn parse_authority(authority: &str) -> Result<(String, u16), String> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, rest) = rest
+            .split_once(']')
+            .ok_or_else(|| "LLM endpoint IPv6 host is invalid".to_string())?;
+        let port = if rest.is_empty() {
+            80
+        } else {
+            rest.strip_prefix(':')
+                .ok_or_else(|| "LLM endpoint port is invalid".to_string())?
+                .parse::<u16>()
+                .map_err(|_| "LLM endpoint port is invalid".to_string())?
+        };
+        return Ok((host.to_string(), port));
+    }
+
+    if authority.matches(':').count() > 1 {
+        return Ok((authority.to_string(), 80));
+    }
+
+    if let Some((host, port)) = authority.rsplit_once(':') {
+        let port = port
+            .parse::<u16>()
+            .map_err(|_| "LLM endpoint port is invalid".to_string())?;
+        Ok((host.to_string(), port))
+    } else {
+        Ok((authority.to_string(), 80))
+    }
+}
+
+fn is_local_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<IpAddr>()
+            .map(|address| match address {
+                IpAddr::V4(address) => address.is_loopback(),
+                IpAddr::V6(address) => address == Ipv6Addr::LOCALHOST,
+            })
+            .unwrap_or(false)
+}
+
+fn bracket_ipv6_host(host: &str) -> String {
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
 }
 
 fn parse_ollama_response(response: &str) -> Result<String, String> {
@@ -290,5 +352,27 @@ mod tests {
         assert_eq!(endpoint.host, "127.0.0.1");
         assert_eq!(endpoint.port, 11434);
         assert_eq!(endpoint.path, "/api/generate");
+        assert_eq!(endpoint.host_header(), "127.0.0.1:11434");
+    }
+
+    #[test]
+    fn parses_localhost_and_loopback_ipv6_endpoints() {
+        let localhost = parse_http_endpoint("http://localhost/api/generate").unwrap();
+        assert_eq!(localhost.host, "localhost");
+        assert_eq!(localhost.port, 80);
+        assert_eq!(localhost.host_header(), "localhost");
+
+        let ipv6 = parse_http_endpoint("http://[::1]:11434/api/generate").unwrap();
+        assert_eq!(ipv6.host, "::1");
+        assert_eq!(ipv6.port, 11434);
+        assert_eq!(ipv6.socket_address(), "[::1]:11434");
+        assert_eq!(ipv6.host_header(), "[::1]:11434");
+    }
+
+    #[test]
+    fn rejects_non_local_http_endpoint() {
+        let error = parse_http_endpoint("http://example.com/api/generate").unwrap_err();
+
+        assert!(error.contains("local-only"));
     }
 }

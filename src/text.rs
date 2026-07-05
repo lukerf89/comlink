@@ -106,6 +106,7 @@ pub struct ResolvedMode<'a> {
     pub deterministic_mode: TextMode,
     pub llm_instruction: Option<String>,
     pub style_profile: Option<&'a StyleProfile>,
+    pub warnings: Vec<String>,
 }
 
 impl<'a> ResolvedMode<'a> {
@@ -133,11 +134,24 @@ pub fn resolve_mode<'a>(config: &'a Config, name: &str) -> Option<ResolvedMode<'
         .iter()
         .find(|entry| entry.name.eq_ignore_ascii_case(name));
     let builtin = TextMode::parse(name);
-    let deterministic_mode = custom
-        .and_then(|entry| entry.deterministic_mode.as_deref())
-        .and_then(TextMode::parse)
-        .or(builtin)
-        .unwrap_or(TextMode::Memo);
+    let mut warnings = Vec::new();
+    let deterministic_mode = if let Some(entry) = custom {
+        if let Some(configured_mode) = entry.deterministic_mode.as_deref() {
+            TextMode::parse(configured_mode).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "mode '{}' references unknown deterministic mode '{}'; using {}",
+                    entry.name,
+                    configured_mode,
+                    builtin.unwrap_or(TextMode::Memo).as_str()
+                ));
+                builtin.unwrap_or(TextMode::Memo)
+            })
+        } else {
+            builtin.unwrap_or(TextMode::Memo)
+        }
+    } else {
+        builtin?
+    };
     let name = custom
         .map(|entry| entry.name.clone())
         .or_else(|| builtin.map(|mode| mode.as_str().to_string()))?;
@@ -145,9 +159,16 @@ pub fn resolve_mode<'a>(config: &'a Config, name: &str) -> Option<ResolvedMode<'
         .and_then(|entry| entry.description.clone())
         .or_else(|| builtin_description(&name).map(str::to_string))
         .unwrap_or_else(|| "Configured local work mode.".to_string());
-    let style_profile = custom
-        .and_then(|entry| entry.style_profile.as_deref())
-        .and_then(|profile| crate::config::style_profile(config, profile));
+    let configured_style_profile = custom.and_then(|entry| entry.style_profile.as_deref());
+    let style_profile =
+        configured_style_profile.and_then(|profile| crate::config::style_profile(config, profile));
+    if let Some(profile) = configured_style_profile {
+        if style_profile.is_none() {
+            warnings.push(format!(
+                "mode '{name}' references missing style profile '{profile}'; continuing without it"
+            ));
+        }
+    }
 
     Some(ResolvedMode {
         name,
@@ -155,6 +176,7 @@ pub fn resolve_mode<'a>(config: &'a Config, name: &str) -> Option<ResolvedMode<'
         deterministic_mode,
         llm_instruction: custom.and_then(|entry| entry.llm_instruction.clone()),
         style_profile,
+        warnings,
     })
 }
 
@@ -325,7 +347,7 @@ fn clean_spacing_preserving_newlines(raw_text: &str) -> String {
         .split('\n')
         .map(clean_spacing)
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("\n")
         .trim()
         .to_string()
 }
@@ -504,7 +526,7 @@ mod tests {
 
         assert_eq!(
             TextMode::Clean.process("thanks my signature", rules(&[], &snippets)),
-            "thanks Best, Luke"
+            "thanks Best,\nLuke"
         );
     }
 
@@ -558,5 +580,41 @@ mod tests {
             mode.process_deterministic("um ship it", TextRules::default()),
             "ship it"
         );
+    }
+
+    #[test]
+    fn configured_mode_warns_for_unknown_deterministic_mode() {
+        let mut config = Config::default();
+        config.modes.push(ModeEntry {
+            name: "prompt".to_string(),
+            description: None,
+            deterministic_mode: Some("typo".to_string()),
+            llm_instruction: Some("Rewrite as a prompt".to_string()),
+            style_profile: None,
+        });
+
+        let mode = resolve_mode(&config, "prompt").unwrap();
+
+        assert_eq!(mode.deterministic_mode, TextMode::Memo);
+        assert_eq!(mode.warnings.len(), 1);
+        assert!(mode.warnings[0].contains("unknown deterministic mode"));
+    }
+
+    #[test]
+    fn configured_mode_warns_for_missing_style_profile() {
+        let mut config = Config::default();
+        config.modes.push(ModeEntry {
+            name: "prompt".to_string(),
+            description: None,
+            deterministic_mode: Some("clean".to_string()),
+            llm_instruction: Some("Rewrite as a prompt".to_string()),
+            style_profile: Some("missing".to_string()),
+        });
+
+        let mode = resolve_mode(&config, "prompt").unwrap();
+
+        assert!(mode.style_profile.is_none());
+        assert_eq!(mode.warnings.len(), 1);
+        assert!(mode.warnings[0].contains("missing style profile"));
     }
 }
