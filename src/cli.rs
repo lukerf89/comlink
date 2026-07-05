@@ -10,9 +10,9 @@ use crate::{
     config::{self, CliConfigOverrides, ConfigFormat},
     deps, doctor,
     error::ComlinkError,
-    output::{self, OutputFormat},
+    output::{self, ContextMetadata, OutputFormat},
     record,
-    storage::{self, PruneResult, StoredSession, StoredSessionSummary},
+    storage::{self, PruneResult, StoredSegment, StoredSession, StoredSessionSummary},
     text::{self, TextMode, TextRules},
 };
 
@@ -155,7 +155,7 @@ enum HistoryCommand {
 
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
-        format: ConfigFormat,
+        format: OutputFormat,
     },
 
     /// Remove saved history records.
@@ -618,11 +618,22 @@ fn print_history_list(
 
 fn print_history_session(
     session: &StoredSession,
-    format: ConfigFormat,
+    format: OutputFormat,
 ) -> Result<(), ComlinkError> {
+    let output = StoredSessionOutput::from(session);
     match format {
-        ConfigFormat::Json => println!("{}", serde_json::to_string_pretty(session)?),
-        ConfigFormat::Text => {
+        OutputFormat::Json => println!("{}", serde_json::to_string_pretty(&output)?),
+        OutputFormat::Jsonl => {
+            println!(
+                "{}",
+                serde_json::to_string(&StoredSessionJsonlRecord {
+                    record_type: "transcript",
+                    session: &output,
+                })?
+            );
+        }
+        OutputFormat::Md => println!("{}", render_stored_session_markdown(&output)),
+        OutputFormat::Text => {
             println!("id: {}", session.id);
             println!("created_at_ms: {}", session.created_at_ms);
             println!("mode: {}", session.mode);
@@ -745,6 +756,96 @@ struct PrivacyAudit {
     selected_model_exists: bool,
     asr: String,
     llm: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StoredSessionOutput {
+    schema_version: String,
+    session_id: String,
+    created_at_ms: i64,
+    text: Option<String>,
+    raw_text: Option<String>,
+    final_text: Option<String>,
+    mode: String,
+    copied: bool,
+    engine: String,
+    model: String,
+    duration_ms: u64,
+    segments: Vec<StoredSegment>,
+    source: SourceMetadata,
+    context: ContextMetadata,
+    audio_path: Option<String>,
+}
+
+impl From<&StoredSession> for StoredSessionOutput {
+    fn from(session: &StoredSession) -> Self {
+        Self {
+            schema_version: output::SCHEMA_VERSION.to_string(),
+            session_id: session.id.clone(),
+            created_at_ms: session.created_at_ms,
+            text: session.final_text.clone(),
+            raw_text: session.raw_text.clone(),
+            final_text: session.final_text.clone(),
+            mode: session.mode.clone(),
+            copied: false,
+            engine: session.engine.clone(),
+            model: session.model.clone(),
+            duration_ms: session.duration_ms,
+            segments: session.segments.clone(),
+            source: session.source.clone(),
+            context: ContextMetadata::default(),
+            audio_path: session.audio_path.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct StoredSessionJsonlRecord<'a> {
+    record_type: &'static str,
+    #[serde(flatten)]
+    session: &'a StoredSessionOutput,
+}
+
+fn render_stored_session_markdown(session: &StoredSessionOutput) -> String {
+    let mut markdown = String::new();
+    markdown.push_str("# Comlink Transcript\n\n");
+    markdown.push_str("## Metadata\n\n");
+    markdown.push_str(&format!("- **Schema:** {}\n", session.schema_version));
+    markdown.push_str(&format!("- **Session:** {}\n", session.session_id));
+    markdown.push_str(&format!("- **Created:** {}\n", session.created_at_ms));
+    markdown.push_str(&format!("- **Mode:** {}\n", session.mode));
+    markdown.push_str(&format!("- **Engine:** {}\n", session.engine));
+    markdown.push_str(&format!("- **Model:** {}\n", session.model));
+    markdown.push_str(&format!("- **Duration:** {} ms\n", session.duration_ms));
+    markdown.push_str(&format!("- **Source:** {}\n", session.source.path));
+    markdown.push_str(&format!(
+        "- **Source audio:** {} Hz, {} channel(s)\n",
+        session.source.normalized_sample_rate_hz, session.source.normalized_channels
+    ));
+    markdown.push_str(&format!(
+        "- **Context policy:** {}\n\n",
+        session.context.policy
+    ));
+
+    markdown.push_str("## Final Text\n\n");
+    markdown.push_str(session.final_text.as_deref().unwrap_or("<not retained>"));
+    markdown.push_str("\n\n## Raw Text\n\n");
+    markdown.push_str(session.raw_text.as_deref().unwrap_or("<not retained>"));
+
+    if !session.segments.is_empty() {
+        markdown.push_str("\n\n## Segments\n\n");
+        for (index, segment) in session.segments.iter().enumerate() {
+            markdown.push_str(&format!(
+                "- {}: {}-{} ms: {}\n",
+                index,
+                segment.start_ms,
+                segment.end_ms,
+                segment.text.as_deref().unwrap_or("<not retained>")
+            ));
+        }
+    }
+
+    markdown.trim_end().to_string()
 }
 
 fn print_privacy_audit(audit: &PrivacyAudit, format: ConfigFormat) -> Result<(), ComlinkError> {

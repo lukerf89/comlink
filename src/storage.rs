@@ -1,8 +1,6 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    process,
-    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -15,8 +13,6 @@ use crate::{
     error::ComlinkError,
     output::TranscriptOutput,
 };
-
-static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StoredSession {
@@ -73,7 +69,7 @@ pub fn save_transcript(
     }
 
     let connection = open(paths)?;
-    let session_id = new_session_id();
+    let session_id = transcript.session_id.clone();
     let created_at_ms = now_ms();
     let source = if retention.metadata {
         transcript.source.clone()
@@ -314,15 +310,6 @@ fn delete_audio_files(audio_paths: &[String]) -> Result<u64, ComlinkError> {
     Ok(deleted)
 }
 
-fn new_session_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let sequence = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("s{nanos}-{}-{sequence}", process::id())
-}
-
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -334,7 +321,7 @@ fn now_ms() -> i64 {
 mod tests {
     use crate::{
         asr::{Segment, SourceMetadata},
-        output::{ProcessingStep, TranscriptOutput},
+        output::{ContextMetadata, ProcessingStep, TranscriptOutput, SCHEMA_VERSION},
         text::TextMode,
     };
 
@@ -342,6 +329,8 @@ mod tests {
 
     fn sample_transcript() -> TranscriptOutput {
         TranscriptOutput {
+            schema_version: SCHEMA_VERSION.to_string(),
+            session_id: "session-1".to_string(),
             text: "hello".to_string(),
             raw_text: "hello".to_string(),
             final_text: "hello".to_string(),
@@ -360,6 +349,7 @@ mod tests {
                 normalized_sample_rate_hz: 16_000,
                 normalized_channels: 1,
             },
+            context: ContextMetadata::default(),
             processing_steps: vec![ProcessingStep {
                 name: "raw".to_string(),
             }],

@@ -1,0 +1,1 @@
+error: model path is required; set COMLINK_WHISPER_MODEL or pass --model
