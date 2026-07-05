@@ -59,16 +59,21 @@ Ran `scripts/e2e/phase-5-local-llm-modes.sh`. It:
 
 ## Manual Test Script
 
-1. Add a custom prompt mode:
+1. Configure the ASR model and prompt mode:
 
 ```bash
-cargo run -- modes add prompt --instruction "Convert rough dictation into a concise coding prompt."
+export COMLINK_WHISPER_MODEL="/path/to/ggml-tiny.en.bin"
+
+cargo run -- modes add prompt \
+  --instruction "Convert rough dictation into a concise coding prompt. Preserve facts and technical terms." \
+  --deterministic-mode memo
 ```
 
 Pass criteria:
 
 - The command prints `saved mode: prompt`.
 - `cargo run -- modes list --format json` includes the prompt mode and its `llm_instruction`.
+- `COMLINK_WHISPER_MODEL` points to an existing whisper.cpp ggml model, or `cargo run -- models select tiny --path <model>` has selected one.
 
 2. Run deterministic fallback:
 
@@ -85,13 +90,26 @@ Pass criteria:
 3. Run with a local Ollama model, if available:
 
 ```bash
+export LOCAL_OLLAMA_MODEL="llama3.2"
+ollama pull "$LOCAL_OLLAMA_MODEL"
+ollama serve
+```
+
+In another shell with the same `COMLINK_WHISPER_MODEL` and `LOCAL_OLLAMA_MODEL` values:
+
+```bash
 COMLINK_LLM_ENABLED=true \
+COMLINK_LLM_PROVIDER=ollama \
+COMLINK_LLM_ENDPOINT="http://127.0.0.1:11434/api/generate" \
 COMLINK_LLM_MODEL="$LOCAL_OLLAMA_MODEL" \
 cargo run -- transcribe tests/fixtures/audio/short.wav --mode prompt --format json
 ```
 
 Pass criteria:
 
-- `llm.status` is `rewritten` or, if the model is unavailable, `fallback`.
+- `warnings` is empty.
+- `llm.status` is `rewritten`; `fallback` means deterministic text was used instead of the LLM rewrite.
 - `llm.request.context_policy` is `text-only; no audio; no external context`.
 - Audio paths or audio bytes are not sent to the LLM endpoint.
+
+If Ollama is not installed, run `scripts/e2e/phase-5-local-llm-modes.sh` instead; it starts a fake Ollama-compatible local server and verifies the `rewritten` path.
