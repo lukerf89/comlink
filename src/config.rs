@@ -57,6 +57,7 @@ pub struct SnippetEntry {
 #[serde(rename_all = "kebab-case")]
 pub enum LlmProvider {
     Ollama,
+    #[serde(rename = "openai-compatible", alias = "open-ai-compatible")]
     OpenAiCompatible,
 }
 
@@ -722,6 +723,22 @@ mod tests {
         restore_env("COMLINK_RETAIN_AUDIO", previous);
 
         assert!(error.to_string().contains("COMLINK_RETAIN_AUDIO"));
+    }
+
+    #[test]
+    fn llm_provider_uses_advertised_openai_compatible_spelling() {
+        let serialized = serde_json::to_string(&LlmProvider::OpenAiCompatible).unwrap();
+        assert_eq!(serialized, r#""openai-compatible""#);
+
+        let provider: LlmProvider = serde_json::from_str(r#""openai-compatible""#).unwrap();
+        assert_eq!(provider, LlmProvider::OpenAiCompatible);
+    }
+
+    #[test]
+    fn llm_provider_accepts_legacy_kebab_case_spelling() {
+        let provider: LlmProvider = serde_json::from_str(r#""open-ai-compatible""#).unwrap();
+
+        assert_eq!(provider, LlmProvider::OpenAiCompatible);
     }
 
     #[test]

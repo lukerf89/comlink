@@ -398,6 +398,7 @@ fn transcribe(
     no_llm: bool,
 ) -> Result<(), ComlinkError> {
     let resolved = config::load(CliConfigOverrides { model })?;
+    validate_requested_mode(&resolved.config, mode)?;
     let model_path =
         config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
     let runtime = deps::runtime_from_model_path(model_path)?;
@@ -447,6 +448,7 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
         no_llm,
     } = options;
     let resolved = config::load(CliConfigOverrides { model })?;
+    validate_requested_mode(&resolved.config, mode)?;
     let model_path =
         config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
     let runtime = deps::runtime_from_model_path(model_path)?;
@@ -496,6 +498,12 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
     maybe_save_transcript(&resolved, &mut transcript, save, Some(&captured.path))?;
     eprintln!("Stop-to-final latency: {} ms.", stop_to_final_ms);
     output::print_transcript(&transcript, format)
+}
+
+fn validate_requested_mode(config: &config::Config, mode: &str) -> Result<(), ComlinkError> {
+    text::resolve_mode(config, mode)
+        .map(|_| ())
+        .ok_or_else(|| ComlinkError::ModeNotFound(mode.to_string()))
 }
 
 fn run_config(command: ConfigCommand) -> Result<(), ComlinkError> {
@@ -1052,4 +1060,30 @@ fn print_privacy_audit(audit: &PrivacyAudit, format: ConfigFormat) -> Result<(),
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_requested_mode_rejects_unknown_mode_before_asr() {
+        let error = validate_requested_mode(&config::Config::default(), "missing").unwrap_err();
+
+        assert!(matches!(error, ComlinkError::ModeNotFound(mode) if mode == "missing"));
+    }
+
+    #[test]
+    fn validate_requested_mode_accepts_configured_mode() {
+        let mut config = config::Config::default();
+        config.modes.push(config::ModeEntry {
+            name: "prompt".to_string(),
+            description: None,
+            deterministic_mode: Some("memo".to_string()),
+            llm_instruction: Some("Rewrite as a prompt".to_string()),
+            style_profile: None,
+        });
+
+        validate_requested_mode(&config, "prompt").unwrap();
+    }
 }
