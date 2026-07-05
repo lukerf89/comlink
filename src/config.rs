@@ -792,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn load_persistent_ignores_runtime_env_model() {
+    fn load_persistent_ignores_runtime_env_overrides() {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_file = dir.path().join("config.json");
@@ -807,13 +807,22 @@ mod tests {
 
         let previous_home = env::var_os("COMLINK_HOME");
         let previous_model = env::var_os("COMLINK_WHISPER_MODEL");
+        let previous_llm_enabled = env::var_os("COMLINK_LLM_ENABLED");
+        let previous_llm_endpoint = env::var_os("COMLINK_LLM_ENDPOINT");
+        let previous_llm_model = env::var_os("COMLINK_LLM_MODEL");
         env::set_var("COMLINK_HOME", dir.path());
         env::set_var("COMLINK_WHISPER_MODEL", "/tmp/env-model.bin");
+        env::set_var("COMLINK_LLM_ENABLED", "true");
+        env::set_var("COMLINK_LLM_ENDPOINT", "http://127.0.0.1:9999/api/generate");
+        env::set_var("COMLINK_LLM_MODEL", "env-llm");
 
         let resolved = load_persistent().unwrap();
 
         restore_env("COMLINK_HOME", previous_home);
         restore_env("COMLINK_WHISPER_MODEL", previous_model);
+        restore_env("COMLINK_LLM_ENABLED", previous_llm_enabled);
+        restore_env("COMLINK_LLM_ENDPOINT", previous_llm_endpoint);
+        restore_env("COMLINK_LLM_MODEL", previous_llm_model);
 
         assert_eq!(resolved.config.selected_model.as_deref(), Some("file"));
         assert_eq!(resolved.config.models.len(), 1);
@@ -824,6 +833,15 @@ mod tests {
         assert!(!resolved
             .sources
             .contains(&"COMLINK_WHISPER_MODEL".to_string()));
+        assert!(!resolved.config.llm.enabled);
+        assert_eq!(
+            resolved.config.llm.endpoint,
+            "http://127.0.0.1:11434/api/generate"
+        );
+        assert_eq!(resolved.config.llm.model, None);
+        assert!(!resolved
+            .sources
+            .contains(&"COMLINK_LLM_ENABLED".to_string()));
     }
 
     #[test]

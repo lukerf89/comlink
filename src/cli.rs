@@ -540,13 +540,16 @@ fn run_history(command: HistoryCommand) -> Result<(), ComlinkError> {
 }
 
 fn run_models(command: ModelsCommand) -> Result<(), ComlinkError> {
-    let mut resolved = config::load(CliConfigOverrides::default())?;
     match command {
-        ModelsCommand::List { format } => print_models(&resolved, format),
+        ModelsCommand::List { format } => {
+            let resolved = config::load(CliConfigOverrides::default())?;
+            print_models(&resolved, format)
+        }
         ModelsCommand::Select { name, path } => {
             if !path.is_file() {
                 return Err(ComlinkError::ModelPathMissing(path));
             }
+            let mut resolved = config::load_persistent()?;
             let path = path.canonicalize()?;
             config::select_model(&mut resolved, &name, path);
             config::save(&resolved.paths, &resolved.config)?;
