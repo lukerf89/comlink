@@ -37,7 +37,9 @@ Current transcript JSON includes:
 - `processing_steps`: deterministic processing steps applied.
 - `history_session_id`: present when the transcript was saved to local history.
 
-For saved sessions where transcript retention was disabled, `history show --format json|jsonl|md` keeps the v1 metadata fields and emits retained text fields as `null` or `<not retained>`.
+For saved sessions, `schema_version` and `copied` are persisted at capture time and echoed by `history show`. Where transcript retention was disabled, `history show --format json|jsonl|md` keeps the v1 metadata fields and emits retained text fields as `null` or `<not retained>`.
+
+`context` is reserved for future local context controls. In v1 it is intentionally empty and always carries `policy: "none"` with no `items`; agents should not treat it as a signal that external context was used.
 
 ## JSONL Records
 
@@ -49,7 +51,7 @@ segment
 transcript
 ```
 
-The final `transcript` record contains the same fields as JSON output, plus `record_type`. Saved-session JSONL emits a single `transcript` record.
+The final live `transcript` record contains completed transcript metadata and text plus `record_type`, but omits `segments` because each segment has already been emitted as its own `segment` record. Saved-session JSONL emits a single self-contained `transcript` record with retained segments.
 
 ## Markdown
 

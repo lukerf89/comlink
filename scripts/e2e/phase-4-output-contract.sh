@@ -133,7 +133,7 @@ import sys
 json_path, jsonl_path, md_path = sys.argv[1:4]
 
 data = json.load(open(json_path))
-required = [
+json_required = [
     "schema_version",
     "session_id",
     "raw_text",
@@ -146,7 +146,7 @@ required = [
     "source",
     "context",
 ]
-missing = [key for key in required if key not in data]
+missing = [key for key in json_required if key not in data]
 if missing:
     raise SystemExit(f"JSON output missing contract fields: {missing}")
 if data["schema_version"] != "comlink.session.v1":
@@ -165,10 +165,26 @@ if data["history_session_id"] != data["session_id"]:
 lines = [json.loads(line) for line in open(jsonl_path) if line.strip()]
 if [line["record_type"] for line in lines] != ["session", "segment", "transcript"]:
     raise SystemExit(f"unexpected JSONL record sequence: {lines}")
+if lines[1]["segment"]["text"] != data["raw_text"]:
+    raise SystemExit("JSONL segment record should carry raw segment text")
 final = lines[-1]
-for key in required:
+jsonl_final_required = [
+    "schema_version",
+    "session_id",
+    "raw_text",
+    "final_text",
+    "mode",
+    "engine",
+    "model",
+    "duration_ms",
+    "source",
+    "context",
+]
+for key in jsonl_final_required:
     if key not in final:
         raise SystemExit(f"JSONL final record missing {key}")
+if "segments" in final:
+    raise SystemExit("JSONL final record should not duplicate segment records")
 if final["schema_version"] != "comlink.session.v1":
     raise SystemExit("JSONL final record schema mismatch")
 if final["final_text"] != "Phase four agent output for Supabase.":
@@ -216,8 +232,12 @@ if len(records) != 1 or records[0]["record_type"] != "transcript":
     raise SystemExit(f"unexpected saved-session JSONL: {records}")
 if records[0]["schema_version"] != "comlink.session.v1":
     raise SystemExit("saved-session JSONL should include schema version")
+if records[0]["copied"] is not False:
+    raise SystemExit("saved-session JSONL should preserve copied flag")
 if records[0]["context"]["policy"] != "none":
     raise SystemExit("saved-session JSONL should include context policy")
+if not records[0]["segments"]:
+    raise SystemExit("saved-session JSONL should include retained segments")
 PY
 
 python3 - "$artifact_dir/transcribe.json" "$artifact_dir/transcribe.jsonl" <<'PY'

@@ -780,14 +780,14 @@ struct StoredSessionOutput {
 impl From<&StoredSession> for StoredSessionOutput {
     fn from(session: &StoredSession) -> Self {
         Self {
-            schema_version: output::SCHEMA_VERSION.to_string(),
+            schema_version: session.schema_version.clone(),
             session_id: session.id.clone(),
             created_at_ms: session.created_at_ms,
             text: session.final_text.clone(),
             raw_text: session.raw_text.clone(),
             final_text: session.final_text.clone(),
             mode: session.mode.clone(),
-            copied: false,
+            copied: session.copied,
             engine: session.engine.clone(),
             model: session.model.clone(),
             duration_ms: session.duration_ms,

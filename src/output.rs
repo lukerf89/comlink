@@ -167,7 +167,20 @@ fn print_jsonl(transcript: &TranscriptOutput) -> Result<(), ComlinkError> {
 
     let final_record = JsonlTranscriptRecord {
         record_type: "transcript",
-        transcript,
+        schema_version: &transcript.schema_version,
+        session_id: &transcript.session_id,
+        text: &transcript.text,
+        raw_text: &transcript.raw_text,
+        final_text: &transcript.final_text,
+        mode: transcript.mode,
+        copied: transcript.copied,
+        engine: &transcript.engine,
+        model: &transcript.model,
+        duration_ms: transcript.duration_ms,
+        source: &transcript.source,
+        context: &transcript.context,
+        processing_steps: &transcript.processing_steps,
+        history_session_id: transcript.history_session_id.as_deref(),
     };
     println!("{}", serde_json::to_string(&final_record)?);
     Ok(())
@@ -252,8 +265,20 @@ struct JsonlSegmentRecord<'a> {
 #[derive(Debug, Serialize)]
 struct JsonlTranscriptRecord<'a> {
     record_type: &'static str,
-    #[serde(flatten)]
-    transcript: &'a TranscriptOutput,
+    schema_version: &'a str,
+    session_id: &'a str,
+    text: &'a str,
+    raw_text: &'a str,
+    final_text: &'a str,
+    mode: TextMode,
+    copied: bool,
+    engine: &'a str,
+    model: &'a str,
+    duration_ms: u64,
+    source: &'a SourceMetadata,
+    context: &'a ContextMetadata,
+    processing_steps: &'a [ProcessingStep],
+    history_session_id: Option<&'a str>,
 }
 
 #[cfg(test)]
@@ -333,5 +358,53 @@ mod tests {
         assert!(markdown.contains("- **Schema:** comlink.session.v1"));
         assert!(markdown.contains("## Final Text"));
         assert!(markdown.contains("raw words"));
+    }
+
+    #[test]
+    fn jsonl_final_record_omits_segment_array() {
+        let transcript = TranscriptOutput::from_transcript(
+            Transcript {
+                text: "hello".to_string(),
+                engine: "whisper.cpp".to_string(),
+                model: "model.bin".to_string(),
+                duration_ms: 100,
+                segments: vec![Segment {
+                    start_ms: 0,
+                    end_ms: 100,
+                    text: "hello".to_string(),
+                }],
+                source: SourceMetadata {
+                    path: "short.wav".to_string(),
+                    normalized_sample_rate_hz: 16_000,
+                    normalized_channels: 1,
+                },
+            },
+            TextMode::Raw,
+            false,
+            &Default::default(),
+        );
+
+        let record = JsonlTranscriptRecord {
+            record_type: "transcript",
+            schema_version: &transcript.schema_version,
+            session_id: &transcript.session_id,
+            text: &transcript.text,
+            raw_text: &transcript.raw_text,
+            final_text: &transcript.final_text,
+            mode: transcript.mode,
+            copied: transcript.copied,
+            engine: &transcript.engine,
+            model: &transcript.model,
+            duration_ms: transcript.duration_ms,
+            source: &transcript.source,
+            context: &transcript.context,
+            processing_steps: &transcript.processing_steps,
+            history_session_id: transcript.history_session_id.as_deref(),
+        };
+
+        let json = serde_json::to_value(record).unwrap();
+        assert_eq!(json["record_type"], "transcript");
+        assert_eq!(json["final_text"], "hello");
+        assert!(json.get("segments").is_none());
     }
 }
