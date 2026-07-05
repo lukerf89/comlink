@@ -81,7 +81,7 @@ pub fn rewrite(
         LlmProvider::OpenAiCompatible => json!({
             "model": model,
             "messages": [
-                {"role": "system", "content": system_prompt(input.instruction, input.profile)},
+                {"role": "system", "content": chat_system_prompt(input.instruction, input.profile)},
                 {"role": "user", "content": input.text}
             ],
             "stream": false
@@ -137,9 +137,22 @@ fn build_prompt(input: &RewriteInput<'_>) -> String {
         "{}\n\nContext policy: {}\n\n{}\n\nText:\n{}",
         system_prompt(input.instruction, input.profile),
         LLM_CONTEXT_POLICY,
-        "Return only the rewritten text. Preserve facts, technical terms, filenames, URLs, and code symbols.",
+        rewrite_contract(),
         input.text
     )
+}
+
+fn chat_system_prompt(instruction: &str, profile: Option<&StyleProfile>) -> String {
+    format!(
+        "{}\n\nContext policy: {}\n\n{}",
+        system_prompt(instruction, profile),
+        LLM_CONTEXT_POLICY,
+        rewrite_contract()
+    )
+}
+
+fn rewrite_contract() -> &'static str {
+    "Return only the rewritten text. Preserve facts, technical terms, filenames, URLs, and code symbols."
 }
 
 fn system_prompt(instruction: &str, profile: Option<&StyleProfile>) -> String {
@@ -343,6 +356,15 @@ mod tests {
             request.context_policy,
             "text-only; no audio; no external context"
         );
+    }
+
+    #[test]
+    fn openai_compatible_system_prompt_includes_rewrite_contract() {
+        let prompt = chat_system_prompt("Rewrite as a prompt.", None);
+
+        assert!(prompt.contains("Context policy: text-only; no audio; no external context"));
+        assert!(prompt.contains("Return only the rewritten text."));
+        assert!(prompt.contains("Preserve facts"));
     }
 
     #[test]
