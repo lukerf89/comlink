@@ -1,9 +1,8 @@
-use clap::ValueEnum;
 use serde::Serialize;
 
-use crate::config::{SnippetEntry, VocabularyEntry};
+use crate::config::{Config, ModeEntry, SnippetEntry, StyleProfile, VocabularyEntry};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TextMode {
     Raw,
@@ -16,9 +15,15 @@ pub enum TextMode {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModeDefinition {
-    pub name: &'static str,
-    pub description: &'static str,
+    pub name: String,
+    pub description: String,
     pub deterministic: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deterministic_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_instruction: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -28,6 +33,18 @@ pub struct TextRules<'a> {
 }
 
 impl TextMode {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "raw" => Some(Self::Raw),
+            "clean" => Some(Self::Clean),
+            "memo" => Some(Self::Memo),
+            "coding-prompt" => Some(Self::CodingPrompt),
+            "email-reply" => Some(Self::EmailReply),
+            "slack-reply" => Some(Self::SlackReply),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Raw => "raw",
@@ -82,40 +99,190 @@ impl TextMode {
     }
 }
 
-pub fn mode_registry() -> Vec<ModeDefinition> {
+#[derive(Debug, Clone)]
+pub struct ResolvedMode<'a> {
+    pub name: String,
+    pub description: String,
+    pub deterministic_mode: TextMode,
+    pub llm_instruction: Option<String>,
+    pub style_profile: Option<&'a StyleProfile>,
+    pub warnings: Vec<String>,
+}
+
+impl<'a> ResolvedMode<'a> {
+    pub fn process_deterministic(&self, raw_text: &str, rules: TextRules<'_>) -> String {
+        self.deterministic_mode.process(raw_text, rules)
+    }
+
+    pub fn processing_steps(&self) -> Vec<String> {
+        let mut steps = self
+            .deterministic_mode
+            .processing_steps()
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if self.name != self.deterministic_mode.as_str() {
+            steps.push(format!("{}-mode", self.name));
+        }
+        steps
+    }
+}
+
+pub fn resolve_mode<'a>(config: &'a Config, name: &str) -> Option<ResolvedMode<'a>> {
+    let custom = config
+        .modes
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(name));
+    let builtin = TextMode::parse(name);
+    let mut warnings = Vec::new();
+    let deterministic_mode = if let Some(entry) = custom {
+        if let Some(configured_mode) = entry.deterministic_mode.as_deref() {
+            TextMode::parse(configured_mode).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "mode '{}' references unknown deterministic mode '{}'; using {}",
+                    entry.name,
+                    configured_mode,
+                    builtin.unwrap_or(TextMode::Memo).as_str()
+                ));
+                builtin.unwrap_or(TextMode::Memo)
+            })
+        } else {
+            builtin.unwrap_or(TextMode::Memo)
+        }
+    } else {
+        builtin?
+    };
+    let name = custom
+        .map(|entry| entry.name.clone())
+        .or_else(|| builtin.map(|mode| mode.as_str().to_string()))?;
+    let description = custom
+        .and_then(|entry| entry.description.clone())
+        .or_else(|| builtin_description(&name).map(str::to_string))
+        .unwrap_or_else(|| "Configured local work mode.".to_string());
+    let configured_style_profile = custom.and_then(|entry| entry.style_profile.as_deref());
+    let style_profile =
+        configured_style_profile.and_then(|profile| crate::config::style_profile(config, profile));
+    if let Some(profile) = configured_style_profile {
+        if style_profile.is_none() {
+            warnings.push(format!(
+                "mode '{name}' references missing style profile '{profile}'; continuing without it"
+            ));
+        }
+    }
+
+    Some(ResolvedMode {
+        name,
+        description,
+        deterministic_mode,
+        llm_instruction: custom.and_then(|entry| entry.llm_instruction.clone()),
+        style_profile,
+        warnings,
+    })
+}
+
+pub fn mode_registry(config: &Config) -> Vec<ModeDefinition> {
+    let mut modes = builtin_mode_registry();
+    for entry in &config.modes {
+        if let Some(existing) = modes
+            .iter_mut()
+            .find(|mode| mode.name.eq_ignore_ascii_case(&entry.name))
+        {
+            merge_custom_definition(existing, entry);
+        } else {
+            modes.push(ModeDefinition {
+                name: entry.name.clone(),
+                description: entry
+                    .description
+                    .clone()
+                    .unwrap_or_else(|| "Configured local work mode.".to_string()),
+                deterministic: entry.llm_instruction.is_none(),
+                deterministic_mode: entry.deterministic_mode.clone(),
+                llm_instruction: entry.llm_instruction.clone(),
+                style_profile: entry.style_profile.clone(),
+            });
+        }
+    }
+    modes
+}
+
+fn builtin_mode_registry() -> Vec<ModeDefinition> {
     vec![
         ModeDefinition {
-            name: TextMode::Raw.as_str(),
-            description: "Trim only; preserve dictated wording.",
+            name: TextMode::Raw.as_str().to_string(),
+            description: "Trim only; preserve dictated wording.".to_string(),
             deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
         },
         ModeDefinition {
-            name: TextMode::Clean.as_str(),
-            description: "Remove safe fillers, normalize whitespace, and apply local rules.",
+            name: TextMode::Clean.as_str().to_string(),
+            description: "Remove safe fillers, normalize whitespace, and apply local rules."
+                .to_string(),
             deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
         },
         ModeDefinition {
-            name: TextMode::Memo.as_str(),
-            description: "Clean work notes without rewriting meaning.",
+            name: TextMode::Memo.as_str().to_string(),
+            description: "Clean work notes without rewriting meaning.".to_string(),
             deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
         },
         ModeDefinition {
-            name: TextMode::CodingPrompt.as_str(),
+            name: TextMode::CodingPrompt.as_str().to_string(),
             description:
-                "Clean technical dictation and add sentence-ending punctuation when needed.",
+                "Clean technical dictation and add sentence-ending punctuation when needed."
+                    .to_string(),
             deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
         },
         ModeDefinition {
-            name: TextMode::EmailReply.as_str(),
-            description: "Clean an email reply while keeping the user's wording.",
+            name: TextMode::EmailReply.as_str().to_string(),
+            description: "Clean an email reply while keeping the user's wording.".to_string(),
             deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
         },
         ModeDefinition {
-            name: TextMode::SlackReply.as_str(),
-            description: "Clean a concise chat reply while keeping the user's wording.",
+            name: TextMode::SlackReply.as_str().to_string(),
+            description: "Clean a concise chat reply while keeping the user's wording.".to_string(),
             deterministic: true,
+            deterministic_mode: None,
+            llm_instruction: None,
+            style_profile: None,
         },
     ]
+}
+
+fn merge_custom_definition(definition: &mut ModeDefinition, custom: &ModeEntry) {
+    if let Some(description) = &custom.description {
+        definition.description = description.clone();
+    }
+    definition.deterministic = custom.llm_instruction.is_none();
+    definition.deterministic_mode = custom.deterministic_mode.clone();
+    definition.llm_instruction = custom.llm_instruction.clone();
+    definition.style_profile = custom.style_profile.clone();
+}
+
+fn builtin_description(name: &str) -> Option<&'static str> {
+    match name {
+        "raw" => Some("Trim only; preserve dictated wording."),
+        "clean" => Some("Remove safe fillers, normalize whitespace, and apply local rules."),
+        "memo" => Some("Clean work notes without rewriting meaning."),
+        "coding-prompt" => {
+            Some("Clean technical dictation and add sentence-ending punctuation when needed.")
+        }
+        "email-reply" => Some("Clean an email reply while keeping the user's wording."),
+        "slack-reply" => Some("Clean a concise chat reply while keeping the user's wording."),
+        _ => None,
+    }
 }
 
 fn apply_sentence_end_mode(raw_text: &str, rules: TextRules<'_>) -> String {
@@ -388,8 +555,66 @@ mod tests {
 
     #[test]
     fn mode_registry_lists_all_builtin_modes() {
-        let modes = mode_registry();
+        let modes = mode_registry(&Default::default());
         assert_eq!(modes.len(), 6);
         assert!(modes.iter().any(|mode| mode.name == "coding-prompt"));
+    }
+
+    #[test]
+    fn configured_mode_resolves_with_instruction_and_fallback() {
+        let mut config = Config::default();
+        config.modes.push(ModeEntry {
+            name: "prompt".to_string(),
+            description: Some("Coding prompt".to_string()),
+            deterministic_mode: Some("clean".to_string()),
+            llm_instruction: Some("Rewrite as a prompt".to_string()),
+            style_profile: None,
+        });
+
+        let mode = resolve_mode(&config, "prompt").unwrap();
+
+        assert_eq!(mode.name, "prompt");
+        assert_eq!(mode.deterministic_mode, TextMode::Clean);
+        assert_eq!(mode.llm_instruction.as_deref(), Some("Rewrite as a prompt"));
+        assert_eq!(
+            mode.process_deterministic("um ship it", TextRules::default()),
+            "ship it"
+        );
+    }
+
+    #[test]
+    fn configured_mode_warns_for_unknown_deterministic_mode() {
+        let mut config = Config::default();
+        config.modes.push(ModeEntry {
+            name: "prompt".to_string(),
+            description: None,
+            deterministic_mode: Some("typo".to_string()),
+            llm_instruction: Some("Rewrite as a prompt".to_string()),
+            style_profile: None,
+        });
+
+        let mode = resolve_mode(&config, "prompt").unwrap();
+
+        assert_eq!(mode.deterministic_mode, TextMode::Memo);
+        assert_eq!(mode.warnings.len(), 1);
+        assert!(mode.warnings[0].contains("unknown deterministic mode"));
+    }
+
+    #[test]
+    fn configured_mode_warns_for_missing_style_profile() {
+        let mut config = Config::default();
+        config.modes.push(ModeEntry {
+            name: "prompt".to_string(),
+            description: None,
+            deterministic_mode: Some("clean".to_string()),
+            llm_instruction: Some("Rewrite as a prompt".to_string()),
+            style_profile: Some("missing".to_string()),
+        });
+
+        let mode = resolve_mode(&config, "prompt").unwrap();
+
+        assert!(mode.style_profile.is_none());
+        assert_eq!(mode.warnings.len(), 1);
+        assert!(mode.warnings[0].contains("missing style profile"));
     }
 }

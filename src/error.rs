@@ -66,6 +66,9 @@ pub enum ComlinkError {
     #[error("{kind} not found: {name}")]
     NotFound { kind: &'static str, name: String },
 
+    #[error("text mode not found: {0}")]
+    ModeNotFound(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 

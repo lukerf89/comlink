@@ -362,7 +362,6 @@ mod tests {
     use crate::{
         asr::{Segment, SourceMetadata},
         output::{ContextMetadata, ProcessingStep, TranscriptOutput, SCHEMA_VERSION},
-        text::TextMode,
     };
 
     use super::*;
@@ -374,7 +373,7 @@ mod tests {
             text: "hello".to_string(),
             raw_text: "hello".to_string(),
             final_text: "hello".to_string(),
-            mode: TextMode::Raw,
+            mode: "raw".to_string(),
             copied: true,
             engine: "whisper.cpp".to_string(),
             model: "model.bin".to_string(),
@@ -393,6 +392,8 @@ mod tests {
             processing_steps: vec![ProcessingStep {
                 name: "raw".to_string(),
             }],
+            warnings: Vec::new(),
+            llm: None,
             history_session_id: None,
         }
     }

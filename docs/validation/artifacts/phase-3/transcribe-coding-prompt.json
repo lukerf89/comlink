@@ -1,4 +1,6 @@
 {
+  "schema_version": "comlink.session.v1",
+  "session_id": "s1783221498230037000-6679-0",
   "text": "update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with Supabase.",
   "raw_text": "uh update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with super base .",
   "final_text": "update src/main.rs then run cargo test --all and check camelCase snake_case https://example.com/api with Supabase.",
@@ -19,6 +21,10 @@
     "normalized_sample_rate_hz": 16000,
     "normalized_channels": 1
   },
+  "context": {
+    "policy": "none",
+    "items": []
+  },
   "processing_steps": [
     {
       "name": "deterministic-cleanup"
@@ -32,5 +38,6 @@
     {
       "name": "coding-prompt-mode"
     }
-  ]
+  ],
+  "warnings": []
 }

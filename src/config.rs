@@ -53,6 +53,66 @@ pub struct SnippetEntry {
     pub body: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum LlmProvider {
+    Ollama,
+    #[serde(rename = "openai-compatible", alias = "open-ai-compatible")]
+    OpenAiCompatible,
+}
+
+impl LlmProvider {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::OpenAiCompatible => "openai-compatible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalLlmConfig {
+    pub enabled: bool,
+    pub provider: LlmProvider,
+    pub endpoint: String,
+    pub model: Option<String>,
+    pub timeout_ms: u64,
+}
+
+impl Default for LocalLlmConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: LlmProvider::Ollama,
+            endpoint: "http://127.0.0.1:11434/api/generate".to_string(),
+            model: None,
+            timeout_ms: 10_000,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModeEntry {
+    pub name: String,
+    pub description: Option<String>,
+    pub deterministic_mode: Option<String>,
+    pub llm_instruction: Option<String>,
+    pub style_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StyleExample {
+    pub input: String,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StyleProfile {
+    pub name: String,
+    pub summary: String,
+    pub examples: Vec<StyleExample>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub history_enabled: bool,
@@ -61,6 +121,9 @@ pub struct Config {
     pub models: Vec<ModelEntry>,
     pub vocabulary: Vec<VocabularyEntry>,
     pub snippets: Vec<SnippetEntry>,
+    pub modes: Vec<ModeEntry>,
+    pub style_profiles: Vec<StyleProfile>,
+    pub llm: LocalLlmConfig,
 }
 
 impl Default for Config {
@@ -72,6 +135,9 @@ impl Default for Config {
             models: Vec::new(),
             vocabulary: Vec::new(),
             snippets: Vec::new(),
+            modes: Vec::new(),
+            style_profiles: Vec::new(),
+            llm: LocalLlmConfig::default(),
         }
     }
 }
@@ -105,6 +171,9 @@ struct FileConfig {
     models: Option<Vec<FileModelEntry>>,
     vocabulary: Option<Vec<VocabularyEntry>>,
     snippets: Option<Vec<SnippetEntry>>,
+    modes: Option<Vec<ModeEntry>>,
+    style_profiles: Option<Vec<StyleProfile>>,
+    llm: Option<FileLocalLlmConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -118,6 +187,15 @@ struct FileRetentionConfig {
 struct FileModelEntry {
     name: String,
     path: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileLocalLlmConfig {
+    enabled: Option<bool>,
+    provider: Option<LlmProvider>,
+    endpoint: Option<String>,
+    model: Option<String>,
+    timeout_ms: Option<u64>,
 }
 
 pub fn load(overrides: CliConfigOverrides) -> Result<ResolvedConfig, ComlinkError> {
@@ -270,6 +348,64 @@ pub fn remove_snippet(config: &mut Config, trigger: &str) -> bool {
     config.snippets.len() != original_len
 }
 
+pub fn upsert_mode(
+    config: &mut Config,
+    name: String,
+    description: Option<String>,
+    deterministic_mode: Option<String>,
+    llm_instruction: Option<String>,
+    style_profile: Option<String>,
+) {
+    if let Some(existing) = config
+        .modes
+        .iter_mut()
+        .find(|entry| entry.name.eq_ignore_ascii_case(&name))
+    {
+        existing.name = name;
+        existing.description = description;
+        existing.deterministic_mode = deterministic_mode;
+        existing.llm_instruction = llm_instruction;
+        existing.style_profile = style_profile;
+    } else {
+        config.modes.push(ModeEntry {
+            name,
+            description,
+            deterministic_mode,
+            llm_instruction,
+            style_profile,
+        });
+    }
+    sort_phrase_entries(&mut config.modes, |entry| &entry.name);
+}
+
+pub fn remove_mode(config: &mut Config, name: &str) -> bool {
+    let original_len = config.modes.len();
+    config
+        .modes
+        .retain(|entry| !entry.name.eq_ignore_ascii_case(name));
+    config.modes.len() != original_len
+}
+
+pub fn upsert_style_profile(config: &mut Config, profile: StyleProfile) {
+    if let Some(existing) = config
+        .style_profiles
+        .iter_mut()
+        .find(|entry| entry.name.eq_ignore_ascii_case(&profile.name))
+    {
+        *existing = profile;
+    } else {
+        config.style_profiles.push(profile);
+    }
+    sort_phrase_entries(&mut config.style_profiles, |entry| &entry.name);
+}
+
+pub fn style_profile<'a>(config: &'a Config, name: &str) -> Option<&'a StyleProfile> {
+    config
+        .style_profiles
+        .iter()
+        .find(|entry| entry.name.eq_ignore_ascii_case(name))
+}
+
 fn resolve_paths() -> Result<ConfigPaths, ComlinkError> {
     let home_dir = if let Some(path) = env::var_os("COMLINK_HOME") {
         PathBuf::from(path)
@@ -358,6 +494,17 @@ fn merge_file_config(config: &mut Config, file: FileConfig) {
         config.snippets = value;
         sort_phrase_entries(&mut config.snippets, |entry| &entry.trigger);
     }
+    if let Some(value) = file.modes {
+        config.modes = value;
+        sort_phrase_entries(&mut config.modes, |entry| &entry.name);
+    }
+    if let Some(value) = file.style_profiles {
+        config.style_profiles = value;
+        sort_phrase_entries(&mut config.style_profiles, |entry| &entry.name);
+    }
+    if let Some(llm) = file.llm {
+        merge_file_llm_config(&mut config.llm, llm);
+    }
 }
 
 fn merge_env(config: &mut Config, sources: &mut Vec<String>) -> Result<(), ComlinkError> {
@@ -382,7 +529,52 @@ fn merge_env(config: &mut Config, sources: &mut Vec<String>) -> Result<(), Comli
         upsert_env_model(config, path);
         sources.push("COMLINK_WHISPER_MODEL".to_string());
     }
+    if let Some(value) = bool_env("COMLINK_LLM_ENABLED")? {
+        config.llm.enabled = value;
+        sources.push("COMLINK_LLM_ENABLED".to_string());
+    }
+    if let Ok(value) = env::var("COMLINK_LLM_PROVIDER") {
+        config.llm.provider = parse_llm_provider(&value)?;
+        sources.push("COMLINK_LLM_PROVIDER".to_string());
+    }
+    if let Ok(value) = env::var("COMLINK_LLM_ENDPOINT") {
+        config.llm.endpoint = value;
+        sources.push("COMLINK_LLM_ENDPOINT".to_string());
+    }
+    if let Ok(value) = env::var("COMLINK_LLM_MODEL") {
+        config.llm.model = Some(value);
+        sources.push("COMLINK_LLM_MODEL".to_string());
+    }
     Ok(())
+}
+
+fn merge_file_llm_config(config: &mut LocalLlmConfig, file: FileLocalLlmConfig) {
+    if let Some(value) = file.enabled {
+        config.enabled = value;
+    }
+    if let Some(value) = file.provider {
+        config.provider = value;
+    }
+    if let Some(value) = file.endpoint {
+        config.endpoint = value;
+    }
+    if let Some(value) = file.model {
+        config.model = Some(value);
+    }
+    if let Some(value) = file.timeout_ms {
+        config.timeout_ms = value;
+    }
+}
+
+fn parse_llm_provider(value: &str) -> Result<LlmProvider, ComlinkError> {
+    match value {
+        "ollama" => Ok(LlmProvider::Ollama),
+        "openai-compatible" | "openai" => Ok(LlmProvider::OpenAiCompatible),
+        _ => Err(ComlinkError::InvalidConfigValue {
+            name: "COMLINK_LLM_PROVIDER",
+            value: value.to_string(),
+        }),
+    }
 }
 
 fn merge_cli_overrides(
@@ -534,6 +726,22 @@ mod tests {
     }
 
     #[test]
+    fn llm_provider_uses_advertised_openai_compatible_spelling() {
+        let serialized = serde_json::to_string(&LlmProvider::OpenAiCompatible).unwrap();
+        assert_eq!(serialized, r#""openai-compatible""#);
+
+        let provider: LlmProvider = serde_json::from_str(r#""openai-compatible""#).unwrap();
+        assert_eq!(provider, LlmProvider::OpenAiCompatible);
+    }
+
+    #[test]
+    fn llm_provider_accepts_legacy_kebab_case_spelling() {
+        let provider: LlmProvider = serde_json::from_str(r#""open-ai-compatible""#).unwrap();
+
+        assert_eq!(provider, LlmProvider::OpenAiCompatible);
+    }
+
+    #[test]
     fn save_omits_runtime_models() {
         let dir = tempfile::tempdir().unwrap();
         let paths = ConfigPaths {
@@ -584,7 +792,7 @@ mod tests {
     }
 
     #[test]
-    fn load_persistent_ignores_runtime_env_model() {
+    fn load_persistent_ignores_runtime_env_overrides() {
         let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let config_file = dir.path().join("config.json");
@@ -599,13 +807,22 @@ mod tests {
 
         let previous_home = env::var_os("COMLINK_HOME");
         let previous_model = env::var_os("COMLINK_WHISPER_MODEL");
+        let previous_llm_enabled = env::var_os("COMLINK_LLM_ENABLED");
+        let previous_llm_endpoint = env::var_os("COMLINK_LLM_ENDPOINT");
+        let previous_llm_model = env::var_os("COMLINK_LLM_MODEL");
         env::set_var("COMLINK_HOME", dir.path());
         env::set_var("COMLINK_WHISPER_MODEL", "/tmp/env-model.bin");
+        env::set_var("COMLINK_LLM_ENABLED", "true");
+        env::set_var("COMLINK_LLM_ENDPOINT", "http://127.0.0.1:9999/api/generate");
+        env::set_var("COMLINK_LLM_MODEL", "env-llm");
 
         let resolved = load_persistent().unwrap();
 
         restore_env("COMLINK_HOME", previous_home);
         restore_env("COMLINK_WHISPER_MODEL", previous_model);
+        restore_env("COMLINK_LLM_ENABLED", previous_llm_enabled);
+        restore_env("COMLINK_LLM_ENDPOINT", previous_llm_endpoint);
+        restore_env("COMLINK_LLM_MODEL", previous_llm_model);
 
         assert_eq!(resolved.config.selected_model.as_deref(), Some("file"));
         assert_eq!(resolved.config.models.len(), 1);
@@ -616,6 +833,15 @@ mod tests {
         assert!(!resolved
             .sources
             .contains(&"COMLINK_WHISPER_MODEL".to_string()));
+        assert!(!resolved.config.llm.enabled);
+        assert_eq!(
+            resolved.config.llm.endpoint,
+            "http://127.0.0.1:11434/api/generate"
+        );
+        assert_eq!(resolved.config.llm.model, None);
+        assert!(!resolved
+            .sources
+            .contains(&"COMLINK_LLM_ENABLED".to_string()));
     }
 
     #[test]

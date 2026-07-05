@@ -1,0 +1,14 @@
+{
+  "history_enabled": true,
+  "retention": {
+    "metadata": true,
+    "transcripts": true,
+    "audio": false
+  },
+  "config_file": "<tmp>/comlink-home/config.json",
+  "database_file": "<tmp>/comlink-home/data/history.sqlite3",
+  "selected_model": "/private<tmp>/mock-model.bin",
+  "selected_model_exists": true,
+  "asr": "local whisper.cpp",
+  "llm": "enabled; provider=ollama; endpoint=http://127.0.0.1:61890/api/generate; model=fake-local; policy=text-only; no audio; no external context"
+}

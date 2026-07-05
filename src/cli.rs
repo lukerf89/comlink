@@ -1,5 +1,5 @@
-use std::env;
 use std::path::PathBuf;
+use std::{env, fs};
 
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -13,7 +13,7 @@ use crate::{
     output::{self, ContextMetadata, OutputFormat},
     record,
     storage::{self, PruneResult, StoredSegment, StoredSession, StoredSessionSummary},
-    text::{self, TextMode, TextRules},
+    text,
 };
 
 const DEFAULT_RECORD_DEVICE: &str = ":0";
@@ -57,6 +57,12 @@ enum Command {
         command: ModesCommand,
     },
 
+    /// Manage local style profiles for LLM rewrite modes.
+    Styles {
+        #[command(subcommand)]
+        command: StylesCommand,
+    },
+
     /// Manage local vocabulary replacements.
     Vocab {
         #[command(subcommand)]
@@ -85,8 +91,8 @@ enum Command {
         format: OutputFormat,
 
         /// Text processing mode.
-        #[arg(long, value_enum, default_value = "raw")]
-        mode: TextMode,
+        #[arg(long, default_value = "raw")]
+        mode: String,
 
         /// whisper.cpp ggml model path. Defaults to COMLINK_WHISPER_MODEL.
         #[arg(long)]
@@ -95,6 +101,10 @@ enum Command {
         /// Save this transcript to local history when history is enabled.
         #[arg(long)]
         save: bool,
+
+        /// Skip any configured local LLM rewrite and use deterministic output.
+        #[arg(long)]
+        no_llm: bool,
     },
 
     /// Record a short microphone memo and transcribe it locally.
@@ -104,8 +114,8 @@ enum Command {
         format: OutputFormat,
 
         /// Text processing mode.
-        #[arg(long, value_enum, default_value = "memo")]
-        mode: TextMode,
+        #[arg(long, default_value = "memo")]
+        mode: String,
 
         /// Copy final text to the macOS clipboard.
         #[arg(long)]
@@ -126,6 +136,10 @@ enum Command {
         /// Save this recording transcript to local history when history is enabled.
         #[arg(long)]
         save: bool,
+
+        /// Skip any configured local LLM rewrite and use deterministic output.
+        #[arg(long)]
+        no_llm: bool,
     },
 }
 
@@ -192,23 +206,71 @@ enum ModelsCommand {
 
 #[derive(Debug, Subcommand)]
 enum ModesCommand {
-    /// List built-in deterministic modes.
+    /// List built-in and configured modes.
     List {
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         format: ConfigFormat,
     },
 
+    /// Add or update a configured local mode.
+    Add {
+        /// Mode name, such as prompt.
+        name: String,
+
+        /// Mode-level local LLM instruction.
+        #[arg(long)]
+        instruction: String,
+
+        /// Deterministic fallback mode used before any LLM rewrite.
+        #[arg(long, default_value = "memo")]
+        deterministic_mode: String,
+
+        /// Human-readable description.
+        #[arg(long)]
+        description: Option<String>,
+
+        /// Optional style profile name to include in local LLM requests.
+        #[arg(long)]
+        style_profile: Option<String>,
+    },
+
     /// Process plain text through a mode without ASR.
     Apply {
         /// Text processing mode.
-        #[arg(long, value_enum)]
-        mode: TextMode,
+        #[arg(long)]
+        mode: String,
 
         /// Text to process.
         #[arg(long)]
         text: String,
 
+        /// Output format.
+        #[arg(long, value_enum, default_value = "text")]
+        format: ConfigFormat,
+    },
+
+    /// Remove a configured local mode.
+    Remove {
+        /// Mode name to remove.
+        name: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum StylesCommand {
+    /// Import a style profile JSON file.
+    Import {
+        /// Structured profile file with name, summary, and examples.
+        file: PathBuf,
+
+        /// Override the profile name from the file.
+        #[arg(long)]
+        name: Option<String>,
+    },
+
+    /// List configured style profiles.
+    List {
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         format: ConfigFormat,
@@ -293,6 +355,7 @@ pub fn run() -> Result<(), ComlinkError> {
         Command::History { command } => run_history(command),
         Command::Models { command } => run_models(command),
         Command::Modes { command } => run_modes(command),
+        Command::Styles { command } => run_styles(command),
         Command::Vocab { command } => run_vocab(command),
         Command::Snippets { command } => run_snippets(command),
         Command::Privacy { command } => run_privacy(command),
@@ -302,7 +365,8 @@ pub fn run() -> Result<(), ComlinkError> {
             mode,
             model,
             save,
-        } => transcribe(file, format, mode, model, save),
+            no_llm,
+        } => transcribe(file, format, &mode, model, save, no_llm),
         Command::Record {
             format,
             mode,
@@ -311,18 +375,30 @@ pub fn run() -> Result<(), ComlinkError> {
             min_duration_ms,
             device,
             save,
-        } => record_memo(format, mode, copy, model, min_duration_ms, device, save),
+            no_llm,
+        } => record_memo(RecordMemoOptions {
+            format,
+            mode: &mode,
+            copy,
+            model,
+            min_duration_ms,
+            device,
+            save,
+            no_llm,
+        }),
     }
 }
 
 fn transcribe(
     file: PathBuf,
     format: OutputFormat,
-    mode: TextMode,
+    mode: &str,
     model: Option<PathBuf>,
     save: bool,
+    no_llm: bool,
 ) -> Result<(), ComlinkError> {
     let resolved = config::load(CliConfigOverrides { model })?;
+    validate_requested_mode(&resolved.config, mode)?;
     let model_path =
         config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
     let runtime = deps::runtime_from_model_path(model_path)?;
@@ -338,22 +414,41 @@ fn transcribe(
     };
 
     let transcript = engine.transcribe(&normalized.path, source, normalized.duration_ms)?;
-    let mut transcript =
-        output::TranscriptOutput::from_transcript(transcript, mode, false, &resolved.config);
+    let mut transcript = output::TranscriptOutput::from_transcript(
+        transcript,
+        mode,
+        false,
+        &resolved.config,
+        no_llm,
+    )?;
     maybe_save_transcript(&resolved, &mut transcript, save, Some(&normalized.path))?;
     output::print_transcript(&transcript, format)
 }
 
-fn record_memo(
+struct RecordMemoOptions<'a> {
     format: OutputFormat,
-    mode: TextMode,
+    mode: &'a str,
     copy: bool,
     model: Option<PathBuf>,
     min_duration_ms: u64,
     device: Option<String>,
     save: bool,
-) -> Result<(), ComlinkError> {
+    no_llm: bool,
+}
+
+fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
+    let RecordMemoOptions {
+        format,
+        mode,
+        copy,
+        model,
+        min_duration_ms,
+        device,
+        save,
+        no_llm,
+    } = options;
     let resolved = config::load(CliConfigOverrides { model })?;
+    validate_requested_mode(&resolved.config, mode)?;
     let model_path =
         config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
     let runtime = deps::runtime_from_model_path(model_path)?;
@@ -386,8 +481,13 @@ fn record_memo(
     };
 
     let transcript = engine.transcribe(&captured.path, source, captured.duration_ms)?;
-    let mut transcript =
-        output::TranscriptOutput::from_transcript(transcript, mode, copy, &resolved.config);
+    let mut transcript = output::TranscriptOutput::from_transcript(
+        transcript,
+        mode,
+        copy,
+        &resolved.config,
+        no_llm,
+    )?;
     let stop_to_final_ms = captured.stopped_at.elapsed().as_millis();
 
     if copy {
@@ -398,6 +498,12 @@ fn record_memo(
     maybe_save_transcript(&resolved, &mut transcript, save, Some(&captured.path))?;
     eprintln!("Stop-to-final latency: {} ms.", stop_to_final_ms);
     output::print_transcript(&transcript, format)
+}
+
+fn validate_requested_mode(config: &config::Config, mode: &str) -> Result<(), ComlinkError> {
+    text::resolve_mode(config, mode)
+        .map(|_| ())
+        .ok_or_else(|| ComlinkError::ModeNotFound(mode.to_string()))
 }
 
 fn run_config(command: ConfigCommand) -> Result<(), ComlinkError> {
@@ -434,13 +540,16 @@ fn run_history(command: HistoryCommand) -> Result<(), ComlinkError> {
 }
 
 fn run_models(command: ModelsCommand) -> Result<(), ComlinkError> {
-    let mut resolved = config::load(CliConfigOverrides::default())?;
     match command {
-        ModelsCommand::List { format } => print_models(&resolved, format),
+        ModelsCommand::List { format } => {
+            let resolved = config::load(CliConfigOverrides::default())?;
+            print_models(&resolved, format)
+        }
         ModelsCommand::Select { name, path } => {
             if !path.is_file() {
                 return Err(ComlinkError::ModelPathMissing(path));
             }
+            let mut resolved = config::load_persistent()?;
             let path = path.canonicalize()?;
             config::select_model(&mut resolved, &name, path);
             config::save(&resolved.paths, &resolved.config)?;
@@ -459,27 +568,78 @@ fn run_models(command: ModelsCommand) -> Result<(), ComlinkError> {
 
 fn run_modes(command: ModesCommand) -> Result<(), ComlinkError> {
     match command {
-        ModesCommand::List { format } => print_modes(format),
+        ModesCommand::List { format } => {
+            let resolved = config::load(CliConfigOverrides::default())?;
+            print_modes(&resolved.config, format)
+        }
+        ModesCommand::Add {
+            name,
+            instruction,
+            deterministic_mode,
+            description,
+            style_profile,
+        } => {
+            if text::TextMode::parse(&deterministic_mode).is_none() {
+                return Err(ComlinkError::ModeNotFound(deterministic_mode));
+            }
+            let mut resolved = config::load_persistent()?;
+            config::upsert_mode(
+                &mut resolved.config,
+                name.clone(),
+                description,
+                Some(deterministic_mode),
+                Some(instruction),
+                style_profile,
+            );
+            config::save(&resolved.paths, &resolved.config)?;
+            println!("saved mode: {name}");
+            Ok(())
+        }
         ModesCommand::Apply { mode, text, format } => {
             let resolved = config::load(CliConfigOverrides::default())?;
-            let final_text = mode.process(
-                &text,
-                TextRules {
-                    vocabulary: &resolved.config.vocabulary,
-                    snippets: &resolved.config.snippets,
-                },
-            );
+            let processed = output::process_text(&text, &mode, &resolved.config, true)?;
             let output = ProcessedTextOutput {
                 raw_text: text,
-                final_text,
-                mode,
-                processing_steps: mode
-                    .processing_steps()
+                final_text: processed.final_text,
+                mode: processed.mode,
+                processing_steps: processed
+                    .processing_steps
                     .into_iter()
-                    .map(str::to_string)
+                    .map(|step| step.name)
                     .collect(),
             };
             print_processed_text(&output, format)
+        }
+        ModesCommand::Remove { name } => {
+            let mut resolved = config::load_persistent()?;
+            if !config::remove_mode(&mut resolved.config, &name) {
+                return Err(ComlinkError::NotFound { kind: "mode", name });
+            }
+            config::save(&resolved.paths, &resolved.config)?;
+            println!("removed mode");
+            Ok(())
+        }
+    }
+}
+
+fn run_styles(command: StylesCommand) -> Result<(), ComlinkError> {
+    match command {
+        StylesCommand::Import { file, name } => {
+            let mut profile: config::StyleProfile =
+                serde_json::from_str(&fs::read_to_string(&file).map_err(ComlinkError::from)?)?;
+            if let Some(name) = name {
+                profile.name = name;
+            }
+            let profile_name = profile.name.clone();
+            let mut resolved = config::load_persistent()?;
+            config::upsert_style_profile(&mut resolved.config, profile);
+            config::save(&resolved.paths, &resolved.config)?;
+            println!("saved style profile: {profile_name}");
+            Ok(())
+        }
+        StylesCommand::List { format } => {
+            let resolved = config::load(CliConfigOverrides::default())?;
+            print_style_profiles(&resolved.config.style_profiles, format)
         }
     }
 }
@@ -562,11 +722,25 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
                     .map(|path| path.is_file())
                     .unwrap_or(false),
                 asr: "local whisper.cpp".to_string(),
-                llm: "disabled; no cloud endpoint configured".to_string(),
+                llm: llm_privacy_status(&resolved.config.llm),
             };
             print_privacy_audit(&audit, format)
         }
     }
+}
+
+fn llm_privacy_status(config: &config::LocalLlmConfig) -> String {
+    if !config.enabled {
+        return "disabled; local LLM rewrite is opt-in".to_string();
+    }
+    let model = config.model.as_deref().unwrap_or("<none>");
+    format!(
+        "enabled; provider={}; endpoint={}; model={}; policy={}",
+        config.provider.as_str(),
+        config.endpoint,
+        model,
+        crate::llm::LLM_CONTEXT_POLICY
+    )
 }
 
 fn maybe_save_transcript(
@@ -680,13 +854,33 @@ fn print_models(
     Ok(())
 }
 
-fn print_modes(format: ConfigFormat) -> Result<(), ComlinkError> {
-    let modes = text::mode_registry();
+fn print_modes(config: &config::Config, format: ConfigFormat) -> Result<(), ComlinkError> {
+    let modes = text::mode_registry(config);
     match format {
         ConfigFormat::Json => println!("{}", serde_json::to_string_pretty(&modes)?),
         ConfigFormat::Text => {
             for mode in modes {
                 println!("{}: {}", mode.name, mode.description);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_style_profiles(
+    profiles: &[config::StyleProfile],
+    format: ConfigFormat,
+) -> Result<(), ComlinkError> {
+    match format {
+        ConfigFormat::Json => println!("{}", serde_json::to_string_pretty(profiles)?),
+        ConfigFormat::Text => {
+            for profile in profiles {
+                println!(
+                    "{}: {} ({} example(s))",
+                    profile.name,
+                    profile.summary,
+                    profile.examples.len()
+                );
             }
         }
     }
@@ -742,7 +936,7 @@ fn decode_cli_newlines(text: &str) -> String {
 struct ProcessedTextOutput {
     raw_text: String,
     final_text: String,
-    mode: TextMode,
+    mode: String,
     processing_steps: Vec<String>,
 }
 
@@ -869,4 +1063,30 @@ fn print_privacy_audit(audit: &PrivacyAudit, format: ConfigFormat) -> Result<(),
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_requested_mode_rejects_unknown_mode_before_asr() {
+        let error = validate_requested_mode(&config::Config::default(), "missing").unwrap_err();
+
+        assert!(matches!(error, ComlinkError::ModeNotFound(mode) if mode == "missing"));
+    }
+
+    #[test]
+    fn validate_requested_mode_accepts_configured_mode() {
+        let mut config = config::Config::default();
+        config.modes.push(config::ModeEntry {
+            name: "prompt".to_string(),
+            description: None,
+            deterministic_mode: Some("memo".to_string()),
+            llm_instruction: Some("Rewrite as a prompt".to_string()),
+            style_profile: None,
+        });
+
+        validate_requested_mode(&config, "prompt").unwrap();
+    }
 }

@@ -1,10 +1,10 @@
 {
   "schema_version": "comlink.session.v1",
-  "session_id": "s1783221495585159000-5879-0",
-  "text": "Phase four agent output for Supabase.",
-  "raw_text": "Phase four agent output for Supabase .",
-  "final_text": "Phase four agent output for Supabase.",
-  "mode": "memo",
+  "session_id": "s1783221488481566000-5357-0",
+  "text": "turn this into Supabase prompt.",
+  "raw_text": "um turn this into super base prompt .",
+  "final_text": "turn this into Supabase prompt.",
+  "mode": "prompt",
   "copied": false,
   "engine": "whisper.cpp",
   "model": "/private<tmp>/mock-model.bin",
@@ -13,7 +13,7 @@
     {
       "start_ms": 0,
       "end_ms": 2080,
-      "text": "Phase four agent output for Supabase ."
+      "text": "um turn this into super base prompt ."
     }
   ],
   "source": {
@@ -37,8 +37,15 @@
     },
     {
       "name": "memo-mode"
+    },
+    {
+      "name": "prompt-mode"
     }
   ],
   "warnings": [],
-  "history_session_id": "s1783221495585159000-5879-0"
+  "llm": {
+    "attempted": false,
+    "status": "skipped",
+    "error": "--no-llm was set"
+  }
 }

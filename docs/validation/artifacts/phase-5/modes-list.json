@@ -28,5 +28,13 @@
     "name": "slack-reply",
     "description": "Clean a concise chat reply while keeping the user's wording.",
     "deterministic": true
+  },
+  {
+    "name": "prompt",
+    "description": "Local coding prompt rewrite",
+    "deterministic": false,
+    "deterministic_mode": "memo",
+    "llm_instruction": "Convert rough dictation into a concise coding prompt. Preserve facts and technical terms.",
+    "style_profile": "concise"
   }
 ]

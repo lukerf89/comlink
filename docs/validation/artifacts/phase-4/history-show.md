@@ -3,8 +3,8 @@
 ## Metadata
 
 - **Schema:** comlink.session.v1
-- **Session:** s1783210169984538000-48204-0
-- **Created:** 1783210169988
+- **Session:** s1783221495585159000-5879-0
+- **Created:** 1783221495588
 - **Mode:** memo
 - **Engine:** whisper.cpp
 - **Model:** /private<tmp>/mock-model.bin
