@@ -19,9 +19,9 @@ Updated: 2026-07-04
 | 1 | Complete | `docs/validation/phase-1.md` |
 | 2 | Complete | `docs/validation/phase-2.md` |
 | 3 | Complete | `docs/validation/phase-3.md` |
-| 4 | Next phase | Not started |
+| 4 | Ready for manual review | `docs/validation/phase-4.md` |
 
-Resume work at Phase 4: Stable Agent-Friendly Output Contract.
+Resume work at the Phase 4 manual review gate before starting Phase 5.
 
 ## Planning Baseline
 

@@ -1,8 +1,6 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
-    process,
-    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -16,13 +14,13 @@ use crate::{
     output::TranscriptOutput,
 };
 
-static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 #[derive(Debug, Clone, Serialize)]
 pub struct StoredSession {
     pub id: String,
+    pub schema_version: String,
     pub created_at_ms: i64,
     pub mode: String,
+    pub copied: bool,
     pub engine: String,
     pub model: String,
     pub duration_ms: u64,
@@ -73,7 +71,7 @@ pub fn save_transcript(
     }
 
     let connection = open(paths)?;
-    let session_id = new_session_id();
+    let session_id = transcript.session_id.clone();
     let created_at_ms = now_ms();
     let source = if retention.metadata {
         transcript.source.clone()
@@ -94,13 +92,15 @@ pub fn save_transcript(
 
     connection.execute(
         "INSERT INTO sessions (
-            id, created_at_ms, mode, engine, model, duration_ms, source_path,
+            id, schema_version, created_at_ms, mode, copied, engine, model, duration_ms, source_path,
             normalized_sample_rate_hz, normalized_channels, raw_text, final_text, audio_path
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             session_id,
+            transcript.schema_version,
             created_at_ms,
             transcript.mode.as_str(),
+            transcript.copied,
             transcript.engine,
             transcript.model,
             transcript.duration_ms as i64,
@@ -169,7 +169,7 @@ pub fn show(paths: &ConfigPaths, id: &str) -> Result<StoredSession, ComlinkError
     let session = connection
         .query_row(
             "SELECT
-                id, created_at_ms, mode, engine, model, duration_ms, source_path,
+                id, schema_version, created_at_ms, mode, copied, engine, model, duration_ms, source_path,
                 normalized_sample_rate_hz, normalized_channels, raw_text, final_text, audio_path
             FROM sessions
             WHERE id = ?1",
@@ -177,19 +177,21 @@ pub fn show(paths: &ConfigPaths, id: &str) -> Result<StoredSession, ComlinkError
             |row| {
                 Ok(StoredSession {
                     id: row.get(0)?,
-                    created_at_ms: row.get(1)?,
-                    mode: row.get(2)?,
-                    engine: row.get(3)?,
-                    model: row.get(4)?,
-                    duration_ms: row.get::<_, i64>(5)? as u64,
+                    schema_version: row.get(1)?,
+                    created_at_ms: row.get(2)?,
+                    mode: row.get(3)?,
+                    copied: row.get(4)?,
+                    engine: row.get(5)?,
+                    model: row.get(6)?,
+                    duration_ms: row.get::<_, i64>(7)? as u64,
                     source: SourceMetadata {
-                        path: row.get(6)?,
-                        normalized_sample_rate_hz: row.get::<_, i64>(7)? as u32,
-                        normalized_channels: row.get::<_, i64>(8)? as u16,
+                        path: row.get(8)?,
+                        normalized_sample_rate_hz: row.get::<_, i64>(9)? as u32,
+                        normalized_channels: row.get::<_, i64>(10)? as u16,
                     },
-                    raw_text: row.get(9)?,
-                    final_text: row.get(10)?,
-                    audio_path: row.get(11)?,
+                    raw_text: row.get(11)?,
+                    final_text: row.get(12)?,
+                    audio_path: row.get(13)?,
                     segments: Vec::new(),
                 })
             },
@@ -250,8 +252,10 @@ fn migrate(connection: &Connection) -> Result<(), ComlinkError> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS sessions (
             id TEXT PRIMARY KEY,
+            schema_version TEXT NOT NULL DEFAULT 'comlink.session.v1',
             created_at_ms INTEGER NOT NULL,
             mode TEXT NOT NULL,
+            copied INTEGER NOT NULL DEFAULT 0,
             engine TEXT NOT NULL,
             model TEXT NOT NULL,
             duration_ms INTEGER NOT NULL,
@@ -278,6 +282,36 @@ fn migrate(connection: &Connection) -> Result<(), ComlinkError> {
         CREATE INDEX IF NOT EXISTS idx_segments_session
             ON segments(session_id, segment_index);",
     )?;
+    add_column_if_missing(
+        connection,
+        "sessions",
+        "schema_version",
+        "ALTER TABLE sessions ADD COLUMN schema_version TEXT NOT NULL DEFAULT 'comlink.session.v1'",
+    )?;
+    add_column_if_missing(
+        connection,
+        "sessions",
+        "copied",
+        "ALTER TABLE sessions ADD COLUMN copied INTEGER NOT NULL DEFAULT 0",
+    )?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    alter_sql: &str,
+) -> Result<(), ComlinkError> {
+    let mut statement = connection.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    let exists = columns
+        .collect::<Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == column);
+    if !exists {
+        connection.execute(alter_sql, [])?;
+    }
     Ok(())
 }
 
@@ -314,15 +348,6 @@ fn delete_audio_files(audio_paths: &[String]) -> Result<u64, ComlinkError> {
     Ok(deleted)
 }
 
-fn new_session_id() -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or_default();
-    let sequence = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("s{nanos}-{}-{sequence}", process::id())
-}
-
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -332,9 +357,11 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
+
     use crate::{
         asr::{Segment, SourceMetadata},
-        output::{ProcessingStep, TranscriptOutput},
+        output::{ContextMetadata, ProcessingStep, TranscriptOutput, SCHEMA_VERSION},
         text::TextMode,
     };
 
@@ -342,11 +369,13 @@ mod tests {
 
     fn sample_transcript() -> TranscriptOutput {
         TranscriptOutput {
+            schema_version: SCHEMA_VERSION.to_string(),
+            session_id: "session-1".to_string(),
             text: "hello".to_string(),
             raw_text: "hello".to_string(),
             final_text: "hello".to_string(),
             mode: TextMode::Raw,
-            copied: false,
+            copied: true,
             engine: "whisper.cpp".to_string(),
             model: "model.bin".to_string(),
             duration_ms: 250,
@@ -360,6 +389,7 @@ mod tests {
                 normalized_sample_rate_hz: 16_000,
                 normalized_channels: 1,
             },
+            context: ContextMetadata::default(),
             processing_steps: vec![ProcessingStep {
                 name: "raw".to_string(),
             }],
@@ -387,9 +417,57 @@ mod tests {
         let session = show(&paths, &id).unwrap();
 
         assert_eq!(session.source.path, "short.wav");
+        assert_eq!(session.schema_version, SCHEMA_VERSION);
+        assert!(session.copied);
         assert_eq!(session.raw_text, None);
         assert_eq!(session.final_text, None);
         assert_eq!(session.segments[0].text, None);
+    }
+
+    #[test]
+    fn migration_backfills_contract_fields_for_existing_sessions() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            home_dir: dir.path().to_path_buf(),
+            config_file: dir.path().join("config.json"),
+            data_dir: dir.path().join("data"),
+            database_file: dir.path().join("data/history.sqlite3"),
+            audio_dir: dir.path().join("data/audio"),
+        };
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        let connection = Connection::open(&paths.database_file).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY,
+                    created_at_ms INTEGER NOT NULL,
+                    mode TEXT NOT NULL,
+                    engine TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    duration_ms INTEGER NOT NULL,
+                    source_path TEXT NOT NULL,
+                    normalized_sample_rate_hz INTEGER NOT NULL,
+                    normalized_channels INTEGER NOT NULL,
+                    raw_text TEXT,
+                    final_text TEXT,
+                    audio_path TEXT
+                );
+                INSERT INTO sessions (
+                    id, created_at_ms, mode, engine, model, duration_ms, source_path,
+                    normalized_sample_rate_hz, normalized_channels, raw_text, final_text, audio_path
+                ) VALUES (
+                    'old-session', 123, 'memo', 'whisper.cpp', 'model.bin', 250, 'short.wav',
+                    16000, 1, 'hello', 'hello', NULL
+                );",
+            )
+            .unwrap();
+        drop(connection);
+
+        let session = show(&paths, "old-session").unwrap();
+
+        assert_eq!(session.schema_version, SCHEMA_VERSION);
+        assert!(!session.copied);
+        assert_eq!(session.final_text.as_deref(), Some("hello"));
     }
 
     #[test]

@@ -99,4 +99,18 @@ mod tests {
         assert_eq!(error.exit_code(), 4);
         assert!(error.to_string().contains("recording too short"));
     }
+
+    #[test]
+    fn phase_four_exit_codes_cover_agent_contract_cases() {
+        assert_eq!(
+            ComlinkError::InputMissing("missing.wav".into()).exit_code(),
+            1
+        );
+        assert_eq!(ComlinkError::ModelMissing.exit_code(), 3);
+        assert_eq!(ComlinkError::EmptyTranscript.exit_code(), 4);
+        assert_eq!(
+            ComlinkError::ClipboardFailed("pbcopy failed".to_string()).exit_code(),
+            5
+        );
+    }
 }
