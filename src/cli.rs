@@ -884,8 +884,11 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
 
     if let Some(active_id) = store.active_session_id()? {
         match store.read_session(&active_id) {
-            Ok(session) if session.status == meet::MeetingStatus::Recording => {
-                return Err(ComlinkError::MeetingAlreadyActive(active_id));
+            Ok(mut session) if session.status == meet::MeetingStatus::Recording => {
+                if session_recorder_is_verified_running(&session) {
+                    return Err(ComlinkError::MeetingAlreadyActive(active_id));
+                }
+                reclaim_inactive_recording_session(&store, &mut session)?;
             }
             _ => store.clear_active_if_matches(&active_id)?,
         }
@@ -924,6 +927,7 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
         }
     };
     session.recorder_pid = Some(capture.pid);
+    session.recorder_identity = Some(capture.identity.clone());
     store.save_session(&session)?;
 
     let consent_reminder =
@@ -946,6 +950,50 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
         },
         format,
     )
+}
+
+fn session_recorder_identity(
+    session: &meet::MeetingSessionState,
+) -> Option<record::SegmentedCaptureIdentity> {
+    if let Some(identity) = &session.recorder_identity {
+        return Some(identity.clone());
+    }
+
+    session.recorder_pid.map(|pid| {
+        let output_pattern = record::chunk_output_pattern(Path::new(&session.chunks_dir));
+        record::SegmentedCaptureIdentity::new(pid, &output_pattern)
+    })
+}
+
+fn session_recorder_is_verified_running(session: &meet::MeetingSessionState) -> bool {
+    session_recorder_identity(session)
+        .as_ref()
+        .map(record::segmented_capture_is_running)
+        .unwrap_or(false)
+}
+
+fn reclaim_inactive_recording_session(
+    store: &meet::FileMeetingStore,
+    session: &mut meet::MeetingSessionState,
+) -> Result<(), ComlinkError> {
+    let duration_ms = store
+        .discover_chunks(session, |path| audio::probe_duration_ms(path, None))
+        .ok()
+        .and_then(|chunks| chunks.last().map(meet::MeetingChunk::end_ms))
+        .unwrap_or_default();
+    session.mark_stopped(meet::now_ms(), duration_ms, 0);
+    store.save_session(session)?;
+    store.clear_active_if_matches(&session.session_id)
+}
+
+fn stop_session_recorder(
+    session: &meet::MeetingSessionState,
+    timeout: Duration,
+) -> Result<bool, ComlinkError> {
+    let Some(identity) = session_recorder_identity(session) else {
+        return Ok(false);
+    };
+    record::stop_segmented_capture(&identity, timeout)
 }
 
 struct MeetStopOptions {
@@ -974,10 +1022,26 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
     }
 
     eprintln!("Stopping meeting recording: {}", session.session_id);
-    if let Some(pid) = session.recorder_pid {
-        record::stop_segmented_capture(pid, Duration::from_secs(wait_timeout_seconds.max(1)))?;
-    }
+    let stopped_at_ms = meet::now_ms();
+    stop_session_recorder(&session, Duration::from_secs(wait_timeout_seconds.max(1)))?;
     std::thread::sleep(Duration::from_millis(250));
+
+    let preliminary_chunks =
+        store.discover_chunks(&session, |path| audio::probe_duration_ms(path, None))?;
+    let preliminary_duration_ms = preliminary_chunks
+        .last()
+        .map(meet::MeetingChunk::end_ms)
+        .unwrap_or_default();
+    session.mark_stopped(stopped_at_ms, preliminary_duration_ms, 0);
+    store.save_session(&session)?;
+    store.clear_active_if_matches(&session.session_id)?;
+
+    if preliminary_chunks.is_empty() {
+        return Err(ComlinkError::AudioCaptureFailed(format!(
+            "meeting recording produced no chunk files; see {}",
+            session.recorder_stderr_path
+        )));
+    }
 
     let runtime = deps::runtime_from_model_path(PathBuf::from(&session.model_path))?;
     let chunks = store.discover_chunks(&session, |path| {
@@ -1001,7 +1065,11 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
             normalized_sample_rate_hz: session.sample_rate_hz,
             normalized_channels: session.channels,
         };
-        let transcript = engine.transcribe(&chunk.path, source, chunk.duration_ms)?;
+        let transcript = match engine.transcribe(&chunk.path, source, chunk.duration_ms) {
+            Ok(transcript) => transcript,
+            Err(ComlinkError::EmptyTranscript) => continue,
+            Err(error) => return Err(error),
+        };
         chunk_transcripts.push(meet::ChunkTranscript {
             chunk_index: chunk.index,
             chunk_path: chunk.path.clone(),
@@ -1012,9 +1080,6 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
     }
 
     let segment_result = meet::build_segments_from_chunk_transcripts(&chunk_transcripts);
-    if segment_result.segments.is_empty() {
-        return Err(ComlinkError::EmptyTranscript);
-    }
     let raw_text = meet::raw_text_from_segments(&segment_result.segments);
     let processed =
         output::process_text(&raw_text, &session.mode, &resolved.config, session.no_llm)?;
@@ -1022,7 +1087,6 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
         .last()
         .map(meet::MeetingChunk::end_ms)
         .unwrap_or_default();
-    let stopped_at_ms = meet::now_ms();
     session.mark_stopped(stopped_at_ms, duration_ms, segment_result.segments.len());
     let export = meet::build_export(
         &session,
@@ -1032,13 +1096,12 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
         segment_result.segmenting,
     );
 
+    store.save_session(&session)?;
     store.write_segments_jsonl(&export)?;
     store.write_exports(&export)?;
     if !session.retention.audio {
         store.delete_chunks(&session)?;
     }
-    store.save_session(&session)?;
-    store.clear_active_if_matches(&session.session_id)?;
 
     print_meet_stop(
         &MeetStopStatus {

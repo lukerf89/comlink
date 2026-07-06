@@ -12,6 +12,7 @@ use crate::{
     config::{ConfigPaths, RetentionConfig},
     error::ComlinkError,
     output::{self, TextProcessingResult},
+    record::SegmentedCaptureIdentity,
 };
 
 pub const MEETING_SCHEMA_VERSION: &str = "comlink.meeting.v1";
@@ -78,6 +79,8 @@ pub struct MeetingSessionState {
     pub mode: String,
     pub no_llm: bool,
     pub recorder_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorder_identity: Option<SegmentedCaptureIdentity>,
     pub device: String,
     pub chunk_duration_ms: u64,
     pub sample_rate_hz: u32,
@@ -102,6 +105,7 @@ impl MeetingSessionState {
         self.stopped_at_ms = Some(stopped_at_ms);
         self.duration_ms = Some(duration_ms);
         self.recorder_pid = None;
+        self.recorder_identity = None;
         self.segment_count = segment_count;
     }
 }
@@ -135,6 +139,7 @@ pub fn new_recording_session(options: NewMeetingSession) -> MeetingSessionState 
         mode: options.mode,
         no_llm: options.no_llm,
         recorder_pid: None,
+        recorder_identity: None,
         device: options.device,
         chunk_duration_ms: options.chunk_duration_ms,
         sample_rate_hz: 16_000,
