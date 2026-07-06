@@ -4,18 +4,18 @@ use std::{
     process::Command,
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::ComlinkError;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Segment {
     pub start_ms: u64,
     pub end_ms: u64,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SourceMetadata {
     pub path: String,
     pub normalized_sample_rate_hz: u32,

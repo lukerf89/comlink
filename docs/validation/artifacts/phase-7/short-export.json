@@ -1,0 +1,95 @@
+{
+  "schema_version": "comlink.meeting.v1",
+  "session": {
+    "session_id": "s1783309655467651000-27192-0",
+    "status": "stopped",
+    "started_at_ms": 1783309655467,
+    "stopped_at_ms": 1783309657210,
+    "duration_ms": 180000,
+    "mode": "raw",
+    "source": "microphone device :0",
+    "chunk_duration_ms": 30000,
+    "sample_rate_hz": 16000,
+    "channels": 1,
+    "engine": "whisper.cpp",
+    "model": "<tmp>/mock-model.bin",
+    "segment_count": 6,
+    "inactivity_auto_stop": {
+      "enabled": false,
+      "reason": "not enabled in Phase 7; the current capture adapter has no reliable realtime silence signal"
+    }
+  },
+  "retention": {
+    "metadata": true,
+    "transcripts": true,
+    "audio": false
+  },
+  "segmenting": {
+    "strategy": "chunk-boundaries",
+    "vad_available": false,
+    "detail": "ASR did not expose VAD segment timing; Comlink used capture chunk boundaries"
+  },
+  "artifacts": {
+    "session_dir": "<tmp>/comlink-data/meetings/s1783309655467651000-27192-0",
+    "segments_jsonl": "<tmp>/comlink-data/meetings/s1783309655467651000-27192-0/segments.jsonl",
+    "json_export": "<tmp>/comlink-data/meetings/s1783309655467651000-27192-0/transcript.json",
+    "markdown_export": "<tmp>/comlink-data/meetings/s1783309655467651000-27192-0/transcript.md",
+    "chunks_dir": null
+  },
+  "raw_text": "Meeting segment 00000.\nMeeting segment 00001.\nMeeting segment 00002.\nMeeting segment 00003.\nMeeting segment 00004.\nMeeting segment 00005.",
+  "final_text": "Meeting segment 00000.\nMeeting segment 00001.\nMeeting segment 00002.\nMeeting segment 00003.\nMeeting segment 00004.\nMeeting segment 00005.",
+  "processing_steps": [
+    "raw"
+  ],
+  "warnings": [],
+  "segments": [
+    {
+      "segment_index": 0,
+      "chunk_index": 0,
+      "start_ms": 0,
+      "end_ms": 30000,
+      "text": "Meeting segment 00000.",
+      "chunk_path": null
+    },
+    {
+      "segment_index": 1,
+      "chunk_index": 1,
+      "start_ms": 30000,
+      "end_ms": 60000,
+      "text": "Meeting segment 00001.",
+      "chunk_path": null
+    },
+    {
+      "segment_index": 2,
+      "chunk_index": 2,
+      "start_ms": 60000,
+      "end_ms": 90000,
+      "text": "Meeting segment 00002.",
+      "chunk_path": null
+    },
+    {
+      "segment_index": 3,
+      "chunk_index": 3,
+      "start_ms": 90000,
+      "end_ms": 120000,
+      "text": "Meeting segment 00003.",
+      "chunk_path": null
+    },
+    {
+      "segment_index": 4,
+      "chunk_index": 4,
+      "start_ms": 120000,
+      "end_ms": 150000,
+      "text": "Meeting segment 00004.",
+      "chunk_path": null
+    },
+    {
+      "segment_index": 5,
+      "chunk_index": 5,
+      "start_ms": 150000,
+      "end_ms": 180000,
+      "text": "Meeting segment 00005.",
+      "chunk_path": null
+    }
+  ]
+}

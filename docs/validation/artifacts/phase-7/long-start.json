@@ -1,0 +1,17 @@
+{
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "s1783309657263926000-27574-0",
+  "status": "recording",
+  "elapsed_ms": 103,
+  "recorder_pid": 27575,
+  "session_dir": "<tmp>/comlink-data/meetings/s1783309657263926000-27574-0",
+  "chunks_dir": "<tmp>/comlink-data/meetings/s1783309657263926000-27574-0/chunks",
+  "segments_jsonl": "<tmp>/comlink-data/meetings/s1783309657263926000-27574-0/segments.jsonl",
+  "json_export": "<tmp>/comlink-data/meetings/s1783309657263926000-27574-0/transcript.json",
+  "markdown_export": "<tmp>/comlink-data/meetings/s1783309657263926000-27574-0/transcript.md",
+  "consent_reminder": "Consent reminder: confirm everyone present knows this meeting is being recorded and transcribed.",
+  "inactivity_auto_stop": {
+    "enabled": false,
+    "reason": "not enabled in Phase 7; the current capture adapter has no reliable realtime silence signal"
+  }
+}

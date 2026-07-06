@@ -7,6 +7,7 @@ pub mod deps;
 pub mod doctor;
 pub mod error;
 pub mod llm;
+pub mod meet;
 pub mod output;
 pub mod record;
 pub mod storage;

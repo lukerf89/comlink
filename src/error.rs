@@ -63,6 +63,24 @@ pub enum ComlinkError {
     #[error("history session not found: {0}")]
     HistoryNotFound(String),
 
+    #[error("meeting session not found: {0}")]
+    MeetingSessionNotFound(String),
+
+    #[error("no active meeting session")]
+    MeetingNoActiveSession,
+
+    #[error("meeting session is already recording: {0}")]
+    MeetingAlreadyActive(String),
+
+    #[error("meeting session is not recording: {0}")]
+    MeetingNotRecording(String),
+
+    #[error("meeting session has not stopped yet: {0}")]
+    MeetingNotStopped(String),
+
+    #[error("meeting export is not available: {0}")]
+    MeetingExportUnavailable(PathBuf),
+
     #[error("{kind} not found: {name}")]
     NotFound { kind: &'static str, name: String },
 
