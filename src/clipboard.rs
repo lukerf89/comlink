@@ -1,11 +1,13 @@
 use std::{
     env,
     io::Write,
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
 use crate::error::ComlinkError;
+
+const CLIPBOARD_COMMAND_PATH: &str = "/usr/bin:/bin";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClipboardCommandState {
@@ -88,7 +90,7 @@ pub fn inspect() -> ClipboardReport {
 fn write_text(text: &str) -> Result<(), ComlinkError> {
     let command = copy_command();
 
-    let mut child = Command::new(&command)
+    let mut child = clipboard_command(&command)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -124,7 +126,7 @@ fn write_text(text: &str) -> Result<(), ComlinkError> {
 
 fn read_text() -> Result<String, ComlinkError> {
     let command = read_command();
-    let output = Command::new(&command)
+    let output = clipboard_command(&command)
         .stdin(Stdio::null())
         .output()
         .map_err(|error| {
@@ -141,6 +143,12 @@ fn read_text() -> Result<String, ComlinkError> {
             stderr
         }))
     }
+}
+
+fn clipboard_command(command: &Path) -> Command {
+    let mut child = Command::new(command);
+    child.env("PATH", CLIPBOARD_COMMAND_PATH);
+    child
 }
 
 fn copy_command() -> PathBuf {
