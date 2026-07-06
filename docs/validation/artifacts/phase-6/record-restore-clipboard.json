@@ -1,0 +1,43 @@
+{
+  "schema_version": "comlink.session.v1",
+  "session_id": "s1783287841664124000-16513-0",
+  "text": "Phase six copy target memo.",
+  "raw_text": "Phase six copy target memo .",
+  "final_text": "Phase six copy target memo.",
+  "mode": "memo",
+  "copied": true,
+  "engine": "whisper.cpp",
+  "model": "<tmp>/mock-model.bin",
+  "duration_ms": 2080,
+  "segments": [
+    {
+      "start_ms": 0,
+      "end_ms": 2080,
+      "text": "Phase six copy target memo ."
+    }
+  ],
+  "source": {
+    "path": "microphone",
+    "normalized_sample_rate_hz": 16000,
+    "normalized_channels": 1
+  },
+  "context": {
+    "policy": "none",
+    "items": []
+  },
+  "processing_steps": [
+    {
+      "name": "deterministic-cleanup"
+    },
+    {
+      "name": "vocabulary"
+    },
+    {
+      "name": "snippets"
+    },
+    {
+      "name": "memo-mode"
+    }
+  ],
+  "warnings": []
+}

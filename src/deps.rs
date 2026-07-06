@@ -45,11 +45,17 @@ pub struct RuntimeDeps {
 }
 
 pub fn inspect() -> DependencyReport {
+    inspect_with_model_path(None)
+}
+
+pub fn inspect_with_model_path(model_path: Option<PathBuf>) -> DependencyReport {
     DependencyReport {
         ffmpeg: resolve_binary("COMLINK_FFMPEG", &["ffmpeg"]),
         ffprobe: resolve_binary("COMLINK_FFPROBE", &["ffprobe"]),
         whisper_cpp: resolve_binary("COMLINK_WHISPER_CPP", WHISPER_CPP_CANDIDATES),
-        whisper_model: resolve_model("COMLINK_WHISPER_MODEL"),
+        whisper_model: model_path
+            .map(resolve_model_path)
+            .unwrap_or_else(|| resolve_model("COMLINK_WHISPER_MODEL")),
     }
 }
 
@@ -140,9 +146,16 @@ fn resolve_binary(env_name: &str, candidates: &[&str]) -> DependencyState {
 
 fn resolve_model(env_name: &str) -> DependencyState {
     match env::var_os(env_name).map(PathBuf::from) {
-        Some(path) if path.is_file() => DependencyState::Found(path),
-        Some(path) => DependencyState::NotFound(path),
+        Some(path) => resolve_model_path(path),
         None => DependencyState::Missing,
+    }
+}
+
+fn resolve_model_path(path: PathBuf) -> DependencyState {
+    if path.is_file() {
+        DependencyState::Found(path)
+    } else {
+        DependencyState::NotFound(path)
     }
 }
 

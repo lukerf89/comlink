@@ -1,0 +1,11 @@
+{
+  "raw_text": "uh sounds good , I will check after standup",
+  "final_text": "sounds good, I will check after standup",
+  "mode": "slack",
+  "processing_steps": [
+    "deterministic-cleanup",
+    "vocabulary",
+    "snippets",
+    "slack-formatting-preset"
+  ]
+}

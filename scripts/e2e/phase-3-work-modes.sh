@@ -101,8 +101,9 @@ import sys
 modes = json.load(open(sys.argv[1]))
 names = [mode["name"] for mode in modes]
 expected = ["raw", "clean", "memo", "coding-prompt", "email-reply", "slack-reply"]
-if names != expected:
-    raise SystemExit(f"unexpected mode registry: {names}")
+missing = [name for name in expected if name not in names]
+if missing:
+    raise SystemExit(f"mode registry missing phase 3 modes: {missing}; got {names}")
 if not all(mode["deterministic"] for mode in modes):
     raise SystemExit("all phase 3 modes should be deterministic")
 PY
