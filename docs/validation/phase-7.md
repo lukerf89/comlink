@@ -71,11 +71,18 @@ Artifacts retained:
 
 - Inactivity auto-stop is not shipped in Phase 7. The current FFmpeg segment capture adapter does not expose a reliable realtime silence signal, so shipping auto-stop here would be flaky. Exports explicitly record `inactivity_auto_stop.enabled=false`.
 - VAD-aware stitching is implemented where ASR segment timing is available. The current whisper.cpp text adapter still returns chunk-level segments, so real exports may report `segmenting.strategy=chunk-boundaries` until the ASR adapter parses timed segment output.
+- `ggml-tiny.en.bin` is acceptable for smoke tests but can produce garbled, repetitive transcripts in noisy rooms. For the manual gate, prefer `ggml-base.en.bin`, `ggml-small.en.bin`, or larger if local performance allows it.
 - Real microphone permission, real room acoustics, and 30-60 minute recorder behavior still require the manual gate below.
 
 ## Manual Test Checklist
 
 1. Run `cargo run -- doctor` and confirm FFmpeg, whisper-cli, model path, data path, and microphone info are acceptable.
+   Prefer a non-tiny Whisper model for real meeting audio:
+
+   ```bash
+   cargo run -- models select small --path /path/to/ggml-small.en.bin
+   ```
+
 2. Start with a 10-15 minute real meeting or monologue:
 
    ```bash

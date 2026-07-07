@@ -363,6 +363,9 @@ pub fn build_export(
         "<redacted>".to_string()
     };
 
+    let mut warnings = processed.warnings.clone();
+    warnings.extend(transcript_quality_warnings(session, segments));
+
     MeetingExport {
         schema_version: MEETING_SCHEMA_VERSION.to_string(),
         session: MeetingExportSession {
@@ -391,7 +394,7 @@ pub fn build_export(
             .iter()
             .map(|step| step.name.clone())
             .collect(),
-        warnings: processed.warnings.clone(),
+        warnings,
         segments: segments
             .iter()
             .map(|segment| MeetingSegmentExport {
@@ -404,6 +407,91 @@ pub fn build_export(
             })
             .collect(),
     }
+}
+
+fn transcript_quality_warnings(
+    session: &MeetingSessionState,
+    segments: &[MeetingSegment],
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let model_name = Path::new(&session.model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(&session.model_path)
+        .to_ascii_lowercase();
+    if model_name.contains("tiny") {
+        warnings.push(
+            "meeting was transcribed with a tiny Whisper model; noisy rooms usually need base.en, small.en, or larger for usable quality"
+                .to_string(),
+        );
+    }
+
+    let text = segments
+        .iter()
+        .map(|segment| segment.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if non_speech_marker_count(&text) > 0 {
+        warnings.push(
+            "transcript contains non-speech markers such as [BLANK_AUDIO], which usually indicates silence or background-noise hallucination"
+                .to_string(),
+        );
+    }
+    if has_repetition_loop(&text) {
+        warnings.push(
+            "transcript contains a repeated phrase loop; review the recording environment or rerun with a larger Whisper model"
+                .to_string(),
+        );
+    }
+
+    warnings
+}
+
+fn non_speech_marker_count(text: &str) -> usize {
+    let text = text.to_ascii_lowercase();
+    ["[blank_audio]", "[music]", "[applause]", "[laughter]"]
+        .iter()
+        .map(|marker| text.matches(marker).count())
+        .sum()
+}
+
+fn has_repetition_loop(text: &str) -> bool {
+    let mut previous = String::new();
+    let mut run_len = 0usize;
+
+    for unit in text
+        .split(['.', '!', '?', '\n'])
+        .map(normalize_repetition_unit)
+        .filter(|unit| unit.len() >= 12)
+    {
+        if unit == previous {
+            run_len += 1;
+        } else {
+            previous = unit;
+            run_len = 1;
+        }
+
+        if run_len >= 5 {
+            return true;
+        }
+    }
+
+    false
+}
+
+fn normalize_repetition_unit(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch.is_ascii_whitespace() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub fn render_markdown(export: &MeetingExport) -> String {
@@ -963,5 +1051,78 @@ mod tests {
         assert_eq!(export.final_text, None);
         assert_eq!(export.segments[0].text, None);
         assert_eq!(export.segments[0].chunk_path, None);
+    }
+
+    #[test]
+    fn export_warns_about_noisy_tiny_model_meeting_transcripts() {
+        let retention = MeetingRetentionPolicy::from(&RetentionConfig {
+            metadata: true,
+            transcripts: true,
+            audio: false,
+        });
+        let mut session = new_recording_session(NewMeetingSession {
+            mode: "raw".to_string(),
+            session_id: "meeting-1".to_string(),
+            no_llm: true,
+            device: ":0".to_string(),
+            chunk_duration_ms: 30_000,
+            model: "/models/ggml-tiny.en.bin".to_string(),
+            model_path: "/models/ggml-tiny.en.bin".to_string(),
+            retention,
+            session_dir: PathBuf::from("/tmp/session"),
+            chunks_dir: PathBuf::from("/tmp/session/chunks"),
+            recorder_stderr_path: PathBuf::from("/tmp/session/capture.stderr"),
+            segments_jsonl_path: PathBuf::from("/tmp/session/segments.jsonl"),
+            json_export_path: PathBuf::from("/tmp/session/transcript.json"),
+            markdown_export_path: PathBuf::from("/tmp/session/transcript.md"),
+        });
+        session.mark_stopped(200, 180_000, 1);
+        let repeated = "[BLANK_AUDIO] Please go back to the phone. \
+            Please go back to the phone. Please go back to the phone. \
+            Please go back to the phone. Please go back to the phone. \
+            Please go back to the phone.";
+        let processed = TextProcessingResult {
+            mode: "raw".to_string(),
+            final_text: repeated.to_string(),
+            processing_steps: vec![ProcessingStep {
+                name: "raw".to_string(),
+            }],
+            warnings: Vec::new(),
+            llm: None,
+        };
+        let segments = vec![MeetingSegment {
+            segment_index: 0,
+            chunk_index: 0,
+            start_ms: 0,
+            end_ms: 180_000,
+            text: repeated.to_string(),
+            chunk_path: "/tmp/session/chunks/chunk-00000.wav".to_string(),
+        }];
+
+        let export = build_export(
+            &session,
+            &segments,
+            repeated,
+            &processed,
+            MeetingSegmenting {
+                strategy: "chunk-boundaries".to_string(),
+                vad_available: false,
+                detail: "test".to_string(),
+            },
+        );
+
+        assert_eq!(export.warnings.len(), 3);
+        assert!(export
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("tiny Whisper model")));
+        assert!(export
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("[BLANK_AUDIO]")));
+        assert!(export
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("repeated phrase loop")));
     }
 }

@@ -35,6 +35,10 @@ You can also persist a model selection:
 comlink models select tiny --path /path/to/ggml-tiny.en.bin
 ```
 
+For meeting capture, prefer at least `ggml-base.en.bin` or `ggml-small.en.bin`
+when your machine can handle it. `tiny.en` is useful for fast smoke tests, but
+it is much more likely to hallucinate or repeat phrases in noisy rooms.
+
 Run diagnostics after changing paths:
 
 ```bash

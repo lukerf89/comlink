@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ComlinkError;
 
+const WHISPER_QUALITY_ARGS: &[&str] = &["--suppress-nst", "--no-fallback", "--temperature", "0"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Segment {
     pub start_ms: u64,
@@ -57,9 +59,9 @@ impl AsrEngine for WhisperCppEngine {
         let output_dir = tempfile::tempdir()?;
         let output_base = output_dir.path().join("transcript");
 
-        let output = self.run_whisper(wav_path, &output_base, false)?;
+        let output = self.run_whisper_with_quality_fallback(wav_path, &output_base, false)?;
         let output = if !output.status.success() && should_retry_without_gpu(&output.stderr) {
-            let retry = self.run_whisper(wav_path, &output_base, true)?;
+            let retry = self.run_whisper_with_quality_fallback(wav_path, &output_base, true)?;
             if retry.status.success() {
                 retry
             } else {
@@ -104,16 +106,34 @@ impl AsrEngine for WhisperCppEngine {
 }
 
 impl WhisperCppEngine {
-    fn run_whisper(
+    fn run_whisper_with_quality_fallback(
         &self,
         wav_path: &Path,
         output_base: &Path,
         no_gpu: bool,
     ) -> Result<std::process::Output, ComlinkError> {
+        let output = self.run_whisper(wav_path, output_base, no_gpu, true)?;
+        if !output.status.success() && should_retry_without_quality_args(&output.stderr) {
+            self.run_whisper(wav_path, output_base, no_gpu, false)
+        } else {
+            Ok(output)
+        }
+    }
+
+    fn run_whisper(
+        &self,
+        wav_path: &Path,
+        output_base: &Path,
+        no_gpu: bool,
+        quality_args: bool,
+    ) -> Result<std::process::Output, ComlinkError> {
         let mut command = Command::new(&self.binary);
         command.arg("-m").arg(&self.model).arg("-f").arg(wav_path);
         if no_gpu {
             command.arg("-ng");
+        }
+        if quality_args {
+            command.args(WHISPER_QUALITY_ARGS);
         }
         command.args(["-otxt", "-of"]).arg(output_base);
         Ok(command.output()?)
@@ -145,6 +165,14 @@ fn should_retry_without_gpu(stderr: &[u8]) -> bool {
         || message.contains("gpu")
         || message.contains("ggml_metal")
         || message.contains("failed to allocate buffer")
+}
+
+fn should_retry_without_quality_args(stderr: &[u8]) -> bool {
+    let message = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    message.contains("unknown argument")
+        || message.contains("unknown option")
+        || message.contains("invalid argument")
+        || message.contains("unrecognized option")
 }
 
 fn combine_whisper_errors(first: &[u8], retry: &[u8]) -> String {
@@ -215,6 +243,126 @@ printf 'hello from mock whisper\n' > "$out.txt"
         assert_eq!(transcript.model, model.display().to_string());
         assert_eq!(transcript.duration_ms, 1234);
         assert_eq!(transcript.segments[0].end_ms, 1234);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn whisper_cpp_adapter_passes_quality_args() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("mock-whisper");
+        let args_path = dir.path().join("args.txt");
+        let model = dir.path().join("model.bin");
+        let wav = dir.path().join("audio.wav");
+        fs::write(&model, "model").unwrap();
+        fs::write(&wav, "wav").unwrap();
+
+        let mut file = fs::File::create(&script).unwrap();
+        writeln!(
+            file,
+            r#"#!/bin/sh
+printf '%s\n' "$@" > "{}"
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-of" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+printf 'hello from mock whisper\n' > "$out.txt"
+"#,
+            args_path.display()
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let engine = WhisperCppEngine {
+            binary: script,
+            model: model.clone(),
+        };
+
+        engine
+            .transcribe(
+                &wav,
+                SourceMetadata {
+                    path: "input.wav".to_string(),
+                    normalized_sample_rate_hz: 16_000,
+                    normalized_channels: 1,
+                },
+                1234,
+            )
+            .unwrap();
+
+        let args = fs::read_to_string(args_path).unwrap();
+        assert!(args.contains("--suppress-nst\n"));
+        assert!(args.contains("--no-fallback\n"));
+        assert!(args.contains("--temperature\n0\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn whisper_cpp_adapter_retries_without_quality_args_when_unsupported() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("mock-whisper");
+        let model = dir.path().join("model.bin");
+        let wav = dir.path().join("audio.wav");
+        let calls = dir.path().join("calls.txt");
+        fs::write(&model, "model").unwrap();
+        fs::write(&wav, "wav").unwrap();
+
+        let mut file = fs::File::create(&script).unwrap();
+        writeln!(
+            file,
+            r#"#!/bin/sh
+printf 'call\n' >> "{}"
+for arg in "$@"; do
+  if [ "$arg" = "--suppress-nst" ]; then
+    echo "unknown argument: --suppress-nst" >&2
+    exit 2
+  fi
+done
+out=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "-of" ]; then
+    shift
+    out="$1"
+  fi
+  shift
+done
+printf 'fallback transcript\n' > "$out.txt"
+"#,
+            calls.display()
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&script, permissions).unwrap();
+
+        let engine = WhisperCppEngine {
+            binary: script,
+            model: model.clone(),
+        };
+
+        let transcript = engine
+            .transcribe(
+                &wav,
+                SourceMetadata {
+                    path: "input.wav".to_string(),
+                    normalized_sample_rate_hz: 16_000,
+                    normalized_channels: 1,
+                },
+                1234,
+            )
+            .unwrap();
+
+        assert_eq!(transcript.text, "fallback transcript");
+        assert_eq!(fs::read_to_string(calls).unwrap().lines().count(), 2);
     }
 
     #[test]
