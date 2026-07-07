@@ -365,6 +365,29 @@ pub fn build_export(
 
     let mut warnings = processed.warnings.clone();
     warnings.extend(transcript_quality_warnings(session, segments));
+    let (final_text, final_collapsed) = collapse_repetition_loops(&processed.final_text);
+    let mut exported_segments = Vec::with_capacity(segments.len());
+    let mut segments_collapsed = false;
+    for segment in segments {
+        let (text, collapsed) = collapse_repetition_loops(&segment.text);
+        segments_collapsed |= collapsed;
+        exported_segments.push((segment, text));
+    }
+    let collapsed_repetition = final_collapsed || segments_collapsed;
+    if collapsed_repetition {
+        warnings.push(
+            "repeated phrase loops were collapsed in final transcript and segment text; raw_text preserves the original ASR output"
+                .to_string(),
+        );
+    }
+    let mut processing_steps = processed
+        .processing_steps
+        .iter()
+        .map(|step| step.name.clone())
+        .collect::<Vec<_>>();
+    if collapsed_repetition {
+        processing_steps.push("meeting-repetition-loop-collapse".to_string());
+    }
 
     MeetingExport {
         schema_version: MEETING_SCHEMA_VERSION.to_string(),
@@ -388,21 +411,17 @@ pub fn build_export(
         segmenting,
         artifacts,
         raw_text: retention.transcripts.then(|| raw_text.to_string()),
-        final_text: retention.transcripts.then(|| processed.final_text.clone()),
-        processing_steps: processed
-            .processing_steps
-            .iter()
-            .map(|step| step.name.clone())
-            .collect(),
+        final_text: retention.transcripts.then_some(final_text),
+        processing_steps,
         warnings,
-        segments: segments
-            .iter()
-            .map(|segment| MeetingSegmentExport {
+        segments: exported_segments
+            .into_iter()
+            .map(|(segment, text)| MeetingSegmentExport {
                 segment_index: segment.segment_index,
                 chunk_index: segment.chunk_index,
                 start_ms: segment.start_ms,
                 end_ms: segment.end_ms,
-                text: retention.transcripts.then(|| segment.text.clone()),
+                text: retention.transcripts.then_some(text),
                 chunk_path: retention.audio.then(|| segment.chunk_path.clone()),
             })
             .collect(),
@@ -492,6 +511,75 @@ fn normalize_repetition_unit(text: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[derive(Debug, Clone)]
+struct RepeatUnit {
+    text: String,
+    normalized: String,
+}
+
+fn collapse_repetition_loops(text: &str) -> (String, bool) {
+    let units = repeat_units(text);
+    if units.is_empty() {
+        return (text.trim().to_string(), false);
+    }
+
+    let mut collapsed = false;
+    let mut output = Vec::with_capacity(units.len());
+    let mut index = 0usize;
+    while index < units.len() {
+        let unit = &units[index];
+        if unit.normalized.len() < 7 {
+            output.push(unit.text.clone());
+            index += 1;
+            continue;
+        }
+
+        let mut end = index + 1;
+        while end < units.len() && units[end].normalized == unit.normalized {
+            end += 1;
+        }
+
+        let run_len = end - index;
+        if run_len >= 5 {
+            collapsed = true;
+            output.push(units[index].text.clone());
+            output.push(units[index + 1].text.clone());
+            output.push("[repeated phrase loop collapsed]".to_string());
+        } else {
+            output.extend(units[index..end].iter().map(|unit| unit.text.clone()));
+        }
+        index = end;
+    }
+
+    (output.join(" ").trim().to_string(), collapsed)
+}
+
+fn repeat_units(text: &str) -> Vec<RepeatUnit> {
+    let mut units = Vec::new();
+    let mut current = String::new();
+
+    for ch in text.chars() {
+        current.push(ch);
+        if matches!(ch, '.' | '!' | '?' | ',' | '\n') {
+            push_repeat_unit(&mut units, &mut current);
+        }
+    }
+    push_repeat_unit(&mut units, &mut current);
+
+    units
+}
+
+fn push_repeat_unit(units: &mut Vec<RepeatUnit>, current: &mut String) {
+    let text = current.trim();
+    if !text.is_empty() {
+        units.push(RepeatUnit {
+            text: text.to_string(),
+            normalized: normalize_repetition_unit(text),
+        });
+    }
+    current.clear();
 }
 
 pub fn render_markdown(export: &MeetingExport) -> String {
@@ -1111,7 +1199,7 @@ mod tests {
             },
         );
 
-        assert_eq!(export.warnings.len(), 3);
+        assert_eq!(export.warnings.len(), 4);
         assert!(export
             .warnings
             .iter()
@@ -1124,5 +1212,54 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.contains("repeated phrase loop")));
+        assert!(export
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("raw_text preserves")));
+        assert!(export
+            .processing_steps
+            .contains(&"meeting-repetition-loop-collapse".to_string()));
+        assert_eq!(export.raw_text.as_deref(), Some(repeated));
+        assert!(export
+            .final_text
+            .as_deref()
+            .unwrap()
+            .contains("[repeated phrase loop collapsed]"));
+        assert!(export.segments[0]
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("[repeated phrase loop collapsed]"));
+    }
+
+    #[test]
+    fn repetition_loop_collapse_handles_sentence_and_clause_runs() {
+        let text = "Start. I need your help. I need your help. I need your help. \
+            I need your help. I need your help. I need your help. Then it is like, \
+            it is like, it is like, it is like, it is like, it is like, finished.";
+
+        let (collapsed, changed) = collapse_repetition_loops(text);
+
+        assert!(changed);
+        assert!(collapsed.contains("Start."));
+        assert!(collapsed.contains("finished."));
+        assert_eq!(collapsed.matches("I need your help.").count(), 2);
+        assert!(collapsed.contains("Then it is like, it is like, it is like,"));
+        assert_eq!(
+            collapsed
+                .matches("[repeated phrase loop collapsed]")
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn repetition_loop_collapse_leaves_short_emphasis_alone() {
+        let text = "No, no, no, no, no. Yeah. Yeah. Thanks.";
+
+        let (collapsed, changed) = collapse_repetition_loops(text);
+
+        assert!(!changed);
+        assert_eq!(collapsed, text);
     }
 }

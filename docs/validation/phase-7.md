@@ -14,6 +14,7 @@ Implemented in-person meeting transcript v0:
 - Added saved JSONL segment records plus final JSON and Markdown transcript exports.
 - Added retention policy metadata to JSON, JSONL, and Markdown exports.
 - Added ASR-segment stitching that preserves sub-chunk/VAD timing when the ASR engine supplies it and falls back to chunk boundaries otherwise.
+- Added conservative repeated-phrase loop collapse for final transcript and segment display while preserving the original ASR text in `raw_text`.
 
 Out-of-scope items were not implemented: Zoom/Teams system audio, diarization, live transcript UI, meeting notes, and summaries.
 
