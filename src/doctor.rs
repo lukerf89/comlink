@@ -7,6 +7,7 @@ use crate::{
     config::{self, ConfigFormat, ResolvedConfig},
     deps::{self, DependencyReport, DependencyState},
     error::ComlinkError,
+    system_audio::{self, SystemAudioReport},
 };
 
 const DOCTOR_SCHEMA_VERSION: &str = "comlink.doctor.v1";
@@ -18,6 +19,7 @@ pub struct DoctorReport {
     pub checks: Vec<DoctorCheck>,
     pub paths: DoctorPaths,
     pub privacy: DoctorPrivacy,
+    pub system_audio: SystemAudioReport,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -66,6 +68,7 @@ pub fn run(format: ConfigFormat) -> Result<bool, ComlinkError> {
 
 fn build_report(resolved: &ResolvedConfig, dependencies: &DependencyReport) -> DoctorReport {
     let clipboard = clipboard::inspect();
+    let system_audio = system_audio::inspect(dependencies);
     let mut checks = vec![
         dependency_check(
             "ffmpeg",
@@ -111,6 +114,7 @@ fn build_report(resolved: &ResolvedConfig, dependencies: &DependencyReport) -> D
         ),
         data_path_check(&resolved.paths.data_dir),
     ];
+    checks.push(system_audio_check(&system_audio));
 
     let record_device = std::env::var("COMLINK_RECORD_DEVICE").unwrap_or_else(|_| ":0".to_string());
     checks.push(DoctorCheck {
@@ -155,6 +159,7 @@ fn build_report(resolved: &ResolvedConfig, dependencies: &DependencyReport) -> D
             posture: "local-first; ASR runs through local whisper.cpp; LLM rewrite is opt-in"
                 .to_string(),
         },
+        system_audio,
     }
 }
 
@@ -252,6 +257,17 @@ fn data_path_check(path: &Path) -> DoctorCheck {
     }
 }
 
+fn system_audio_check(report: &SystemAudioReport) -> DoctorCheck {
+    DoctorCheck {
+        name: "system-audio".to_string(),
+        status: report.status.clone(),
+        required: false,
+        path: report.dependency.device_name.clone(),
+        detail: report.detail.clone(),
+        remediation: report.remediation.clone(),
+    }
+}
+
 fn is_readonly(path: &Path) -> bool {
     fs::metadata(path)
         .map(|metadata| metadata.permissions().readonly())
@@ -319,5 +335,18 @@ mod tests {
             check.name == "model-path" && check.status == "missing" && check.required
         }));
         assert!(report.checks.iter().any(|check| check.name == "microphone"));
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "system-audio" && !check.required));
+        assert_eq!(
+            report.system_audio.strategy,
+            "blackhole-virtual-audio-device"
+        );
+        assert!(report
+            .system_audio
+            .source_metadata
+            .labels
+            .contains(&"user_mic".to_string()));
     }
 }

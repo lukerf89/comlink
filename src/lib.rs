@@ -11,4 +11,5 @@ pub mod meet;
 pub mod output;
 pub mod record;
 pub mod storage;
+pub mod system_audio;
 pub mod text;
