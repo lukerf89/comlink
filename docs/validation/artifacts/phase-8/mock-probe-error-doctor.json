@@ -60,10 +60,10 @@
     },
     {
       "name": "system-audio",
-      "status": "missing-dependency",
+      "status": "probe-error",
       "required": false,
-      "detail": "No BlackHole virtual audio input was detected in AVFoundation devices.",
-      "remediation": "Install BlackHole 2ch or 16ch, create a Multi-Output or Aggregate Device for speakers plus BlackHole, and rerun doctor. If COMLINK_SYSTEM_AUDIO_DEVICE is set, it must name a detected BlackHole input."
+      "detail": "ffmpeg AVFoundation device probe did not return an audio device list",
+      "remediation": "Install/configure ffmpeg, then rerun `comlink doctor --format json`; if BlackHole is installed, confirm it appears as an AVFoundation audio input."
     },
     {
       "name": "microphone",
@@ -90,10 +90,10 @@
   },
   "system_audio": {
     "available": false,
-    "status": "missing-dependency",
+    "status": "probe-error",
     "strategy": "blackhole-virtual-audio-device",
-    "detail": "No BlackHole virtual audio input was detected in AVFoundation devices.",
-    "remediation": "Install BlackHole 2ch or 16ch, create a Multi-Output or Aggregate Device for speakers plus BlackHole, and rerun doctor. If COMLINK_SYSTEM_AUDIO_DEVICE is set, it must name a detected BlackHole input.",
+    "detail": "ffmpeg AVFoundation device probe did not return an audio device list",
+    "remediation": "Install/configure ffmpeg, then rerun `comlink doctor --format json`; if BlackHole is installed, confirm it appears as an AVFoundation audio input.",
     "macos_version": "26.5.1",
     "dependency": {
       "name": "BlackHole virtual audio device",

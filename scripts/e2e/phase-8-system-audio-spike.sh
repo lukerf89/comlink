@@ -50,14 +50,18 @@ set -euo pipefail
 case " $* " in
   *" -list_devices true "*)
     {
-      echo "[AVFoundation indev @ 0x1] AVFoundation video devices:"
-      echo "[AVFoundation indev @ 0x1] [0] FaceTime HD Camera"
-      echo "[AVFoundation indev @ 0x1] AVFoundation audio devices:"
-      if [ "${COMLINK_MOCK_BLACKHOLE:-0}" = "1" ]; then
-        echo "[AVFoundation indev @ 0x1] [0] BlackHole 2ch"
-        echo "[AVFoundation indev @ 0x1] [1] MacBook Pro Microphone"
+      if [ "${COMLINK_MOCK_FFMPEG_PROBE_ERROR:-0}" = "1" ]; then
+        echo "mock ffmpeg failed before listing AVFoundation devices"
       else
-        echo "[AVFoundation indev @ 0x1] [0] MacBook Pro Microphone"
+        echo "[AVFoundation indev @ 0x1] AVFoundation video devices:"
+        echo "[AVFoundation indev @ 0x1] [0] FaceTime HD Camera"
+        echo "[AVFoundation indev @ 0x1] AVFoundation audio devices:"
+        if [ "${COMLINK_MOCK_BLACKHOLE:-0}" = "1" ]; then
+          echo "[AVFoundation indev @ 0x1] [0] BlackHole 2ch"
+          echo "[AVFoundation indev @ 0x1] [1] MacBook Pro Microphone"
+        else
+          echo "[AVFoundation indev @ 0x1] [0] MacBook Pro Microphone"
+        fi
       fi
     } >&2
     exit 1
@@ -173,6 +177,8 @@ PY
 
 run_doctor "missing" "missing-dependency" "false"
 run_doctor "available" "ok" "true" COMLINK_MOCK_BLACKHOLE=1
+run_doctor "configured-microphone" "missing-dependency" "false" COMLINK_SYSTEM_AUDIO_DEVICE="MacBook Pro Microphone"
+run_doctor "mock-probe-error" "probe-error" "false" COMLINK_MOCK_FFMPEG_PROBE_ERROR=1
 run_doctor "fake-wrong-os" "unsupported-os" "false" COMLINK_SYSTEM_AUDIO_FAKE=wrong-os
 run_doctor "fake-probe-error" "probe-error" "false" COMLINK_SYSTEM_AUDIO_FAKE=probe-error
 

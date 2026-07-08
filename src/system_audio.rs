@@ -96,7 +96,13 @@ impl SystemAudioProbe for RealSystemAudioProbe {
         let mut probe_error = None;
         let audio_input_devices = if matches!(platform, Platform::MacOs(_)) {
             match self.ffmpeg.as_deref() {
-                Some(ffmpeg) => list_avfoundation_audio_devices(ffmpeg),
+                Some(ffmpeg) => match list_avfoundation_audio_devices(ffmpeg) {
+                    Ok(devices) => devices,
+                    Err(error) => {
+                        probe_error = Some(error);
+                        Vec::new()
+                    }
+                },
                 None => {
                     probe_error = Some(
                         "ffmpeg is unavailable, so AVFoundation audio devices were not listed"
@@ -163,7 +169,7 @@ fn report_from_snapshot(
             false,
             "missing-dependency".to_string(),
             "No BlackHole virtual audio input was detected in AVFoundation devices.".to_string(),
-            "Install BlackHole 2ch or 16ch, create a Multi-Output or Aggregate Device for speakers plus BlackHole, and rerun doctor.".to_string(),
+            "Install BlackHole 2ch or 16ch, create a Multi-Output or Aggregate Device for speakers plus BlackHole, and rerun doctor. If COMLINK_SYSTEM_AUDIO_DEVICE is set, it must name a detected BlackHole input.".to_string(),
         ),
     };
 
@@ -218,7 +224,7 @@ fn find_loopback_device(devices: &[String], preferred_device: Option<String>) ->
     if let Some(preferred) = preferred_device {
         if let Some(device) = devices
             .iter()
-            .find(|device| device.eq_ignore_ascii_case(&preferred))
+            .find(|device| device.eq_ignore_ascii_case(&preferred) && is_blackhole_device(device))
         {
             return Some(device.clone());
         }
@@ -226,12 +232,14 @@ fn find_loopback_device(devices: &[String], preferred_device: Option<String>) ->
 
     devices
         .iter()
-        .find(|device| {
-            device
-                .to_ascii_lowercase()
-                .contains(&BLACKHOLE_DEVICE_HINT.to_ascii_lowercase())
-        })
+        .find(|device| is_blackhole_device(device))
         .cloned()
+}
+
+fn is_blackhole_device(device: &str) -> bool {
+    device
+        .to_ascii_lowercase()
+        .contains(&BLACKHOLE_DEVICE_HINT.to_ascii_lowercase())
 }
 
 fn current_platform() -> Platform {
@@ -255,7 +263,7 @@ fn read_macos_version() -> Option<MacOsVersion> {
     MacOsVersion::parse(stdout.trim())
 }
 
-fn list_avfoundation_audio_devices(ffmpeg: &Path) -> Vec<String> {
+fn list_avfoundation_audio_devices(ffmpeg: &Path) -> Result<Vec<String>, String> {
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -268,13 +276,16 @@ fn list_avfoundation_audio_devices(ffmpeg: &Path) -> Vec<String> {
         ])
         .output();
 
-    match output {
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            parse_avfoundation_audio_devices(&stderr)
-        }
-        Err(_) => Vec::new(),
+    let output = output
+        .map_err(|error| format!("failed to run ffmpeg AVFoundation device probe: {error}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if !stderr.contains("AVFoundation audio devices") {
+        return Err(
+            "ffmpeg AVFoundation device probe did not return an audio device list".to_string(),
+        );
     }
+
+    Ok(parse_avfoundation_audio_devices(&stderr))
 }
 
 fn parse_avfoundation_audio_devices(stderr: &str) -> Vec<String> {
@@ -377,25 +388,19 @@ impl std::fmt::Display for MacOsVersion {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Clone)]
-    struct FakeProbe(SystemAudioProbeSnapshot);
-
-    impl SystemAudioProbe for FakeProbe {
-        fn snapshot(&self) -> SystemAudioProbeSnapshot {
-            self.0.clone()
-        }
-    }
-
     #[test]
     fn reports_available_when_blackhole_input_is_present() {
-        let report = inspect_with_probe(&FakeProbe(SystemAudioProbeSnapshot {
-            platform: Platform::MacOs(Some(MacOsVersion::new(14, 6, 1))),
-            audio_input_devices: vec![
-                "MacBook Pro Microphone".to_string(),
-                "BlackHole 2ch".to_string(),
-            ],
-            probe_error: None,
-        }));
+        let report = report_from_snapshot(
+            SystemAudioProbeSnapshot {
+                platform: Platform::MacOs(Some(MacOsVersion::new(14, 6, 1))),
+                audio_input_devices: vec![
+                    "MacBook Pro Microphone".to_string(),
+                    "BlackHole 2ch".to_string(),
+                ],
+                probe_error: None,
+            },
+            None,
+        );
 
         assert!(report.available);
         assert_eq!(report.status, "ok");
@@ -412,11 +417,14 @@ mod tests {
 
     #[test]
     fn reports_actionable_missing_dependency_on_macos() {
-        let report = inspect_with_probe(&FakeProbe(SystemAudioProbeSnapshot {
-            platform: Platform::MacOs(Some(MacOsVersion::new(14, 6, 1))),
-            audio_input_devices: vec!["MacBook Pro Microphone".to_string()],
-            probe_error: None,
-        }));
+        let report = report_from_snapshot(
+            SystemAudioProbeSnapshot {
+                platform: Platform::MacOs(Some(MacOsVersion::new(14, 6, 1))),
+                audio_input_devices: vec!["MacBook Pro Microphone".to_string()],
+                probe_error: None,
+            },
+            None,
+        );
 
         assert!(!report.available);
         assert_eq!(report.status, "missing-dependency");
@@ -425,12 +433,72 @@ mod tests {
     }
 
     #[test]
+    fn configured_device_does_not_mark_microphone_as_system_audio() {
+        let report = report_from_snapshot(
+            SystemAudioProbeSnapshot {
+                platform: Platform::MacOs(Some(MacOsVersion::new(14, 6, 1))),
+                audio_input_devices: vec!["MacBook Pro Microphone".to_string()],
+                probe_error: None,
+            },
+            Some("MacBook Pro Microphone".to_string()),
+        );
+
+        assert!(!report.available);
+        assert_eq!(report.status, "missing-dependency");
+        assert!(!report.dependency.present);
+        assert!(report.remediation.contains("COMLINK_SYSTEM_AUDIO_DEVICE"));
+    }
+
+    #[test]
+    fn configured_blackhole_device_can_select_exact_input() {
+        let report = report_from_snapshot(
+            SystemAudioProbeSnapshot {
+                platform: Platform::MacOs(Some(MacOsVersion::new(14, 6, 1))),
+                audio_input_devices: vec![
+                    "BlackHole 16ch".to_string(),
+                    "BlackHole 2ch".to_string(),
+                ],
+                probe_error: None,
+            },
+            Some("BlackHole 16ch".to_string()),
+        );
+
+        assert!(report.available);
+        assert_eq!(
+            report.dependency.device_name.as_deref(),
+            Some("BlackHole 16ch")
+        );
+    }
+
+    #[test]
+    fn reports_probe_error_when_ffmpeg_output_has_no_audio_section() {
+        let report = report_from_snapshot(
+            SystemAudioProbeSnapshot {
+                platform: Platform::MacOs(Some(MacOsVersion::new(14, 6, 1))),
+                audio_input_devices: Vec::new(),
+                probe_error: Some(
+                    "ffmpeg AVFoundation device probe did not return an audio device list"
+                        .to_string(),
+                ),
+            },
+            None,
+        );
+
+        assert!(!report.available);
+        assert_eq!(report.status, "probe-error");
+        assert!(report.detail.contains("did not return"));
+    }
+
+    #[test]
     fn reports_wrong_os_without_requiring_host_audio() {
-        let report = inspect_with_probe(&FakeProbe(SystemAudioProbeSnapshot {
-            platform: Platform::Other("linux".to_string()),
-            audio_input_devices: vec!["BlackHole 2ch".to_string()],
-            probe_error: None,
-        }));
+        let report = report_from_snapshot(
+            SystemAudioProbeSnapshot {
+                platform: Platform::Other("linux".to_string()),
+                audio_input_devices: vec!["BlackHole 2ch".to_string()],
+                probe_error: None,
+            },
+            None,
+        );
 
         assert!(!report.available);
         assert_eq!(report.status, "unsupported-os");

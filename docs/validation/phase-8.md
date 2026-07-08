@@ -37,7 +37,7 @@ Results:
 
 - `cargo fmt --check` passed.
 - `cargo clippy --all-targets -- -D warnings` passed.
-- `cargo test --all` passed: 61 library tests, 0 binary tests, 3 integration
+- `cargo test --all` passed: 64 library tests, 0 binary tests, 3 integration
   tests, 0 doc tests.
 - `cargo run -- doctor` passed. Real local doctor reported required checks as
   healthy and reported `system-audio` as non-required missing dependency because
@@ -68,6 +68,9 @@ Unit tests:
 
 - `system_audio::tests::reports_available_when_blackhole_input_is_present`
 - `system_audio::tests::reports_actionable_missing_dependency_on_macos`
+- `system_audio::tests::configured_device_does_not_mark_microphone_as_system_audio`
+- `system_audio::tests::configured_blackhole_device_can_select_exact_input`
+- `system_audio::tests::reports_probe_error_when_ffmpeg_output_has_no_audio_section`
 - `system_audio::tests::reports_wrong_os_without_requiring_host_audio`
 - `system_audio::tests::parses_avfoundation_audio_devices`
 - `system_audio::tests::parses_macos_versions_with_missing_patch`
@@ -86,6 +89,10 @@ The E2E script:
 - Uses mocked FFmpeg, FFprobe, whisper.cpp, clipboard commands, and model path.
 - Exercises the real adapter parse path by having mocked FFmpeg list
   AVFoundation audio devices with and without BlackHole.
+- Verifies a configured built-in microphone is not accepted as the
+  system-audio dependency.
+- Verifies a malformed FFmpeg/AVFoundation probe is reported as `probe-error`
+  instead of a missing BlackHole dependency.
 - Exercises fake injected states for unsupported OS and probe failure.
 - Verifies valid doctor JSON, additive `system_audio`, non-required
   `system-audio` check, actionable remediation, chosen strategy, dependency
@@ -98,6 +105,10 @@ Artifacts retained:
 - `docs/validation/artifacts/phase-8/missing-doctor.err`
 - `docs/validation/artifacts/phase-8/available-doctor.json`
 - `docs/validation/artifacts/phase-8/available-doctor.err`
+- `docs/validation/artifacts/phase-8/configured-microphone-doctor.json`
+- `docs/validation/artifacts/phase-8/configured-microphone-doctor.err`
+- `docs/validation/artifacts/phase-8/mock-probe-error-doctor.json`
+- `docs/validation/artifacts/phase-8/mock-probe-error-doctor.err`
 - `docs/validation/artifacts/phase-8/fake-wrong-os-doctor.json`
 - `docs/validation/artifacts/phase-8/fake-wrong-os-doctor.err`
 - `docs/validation/artifacts/phase-8/fake-probe-error-doctor.json`

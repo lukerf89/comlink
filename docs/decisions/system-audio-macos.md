@@ -44,8 +44,8 @@ provide actionable setup diagnostics before any live meeting capture is shipped.
 
 BlackHole creates a virtual input/output device that lets applications route
 audio to other applications. Comlink can detect it by listing AVFoundation audio
-inputs through FFmpeg and looking for `BlackHole 2ch`, `BlackHole 16ch`, or a
-configured `COMLINK_SYSTEM_AUDIO_DEVICE`.
+inputs through FFmpeg and looking for `BlackHole 2ch`, `BlackHole 16ch`, or an
+exact BlackHole input name configured through `COMLINK_SYSTEM_AUDIO_DEVICE`.
 
 Pros:
 
@@ -290,9 +290,9 @@ Resolved at the Phase 8 manual gate:
 2. **BlackHole 2ch is the documented default.** Meeting audio from Zoom/Teams is
    mono/stereo and Comlink downmixes to 16 kHz mono for local ASR, so the extra
    channels in 16ch add routing/CPU overhead with no benefit for this use case.
-   Detection remains permissive (2ch or 16ch, or `COMLINK_SYSTEM_AUDIO_DEVICE`)
-   so a user already on 16ch is not blocked, but setup docs and validation target
-   2ch.
+   Detection remains permissive (2ch or 16ch, or an exact BlackHole input
+   selected through `COMLINK_SYSTEM_AUDIO_DEVICE`) so a user already on 16ch is
+   not blocked, but setup docs and validation target 2ch.
 3. **Microsoft Teams is validated first** on live hardware; Zoom follows.
 
 Still open, to be answered before/within Phase 9 (not blocking this spike):
