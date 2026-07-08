@@ -19,6 +19,167 @@ pub const MEETING_SCHEMA_VERSION: &str = "comlink.meeting.v1";
 const ACTIVE_SESSION_FILE: &str = "active-session";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MeetSourceMode {
+    MicOnly,
+    SystemOnly,
+    MicPlusSystem,
+}
+
+impl MeetSourceMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MicOnly => "mic-only",
+            Self::SystemOnly => "system-only",
+            Self::MicPlusSystem => "mic-plus-system",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "mic-only" => Some(Self::MicOnly),
+            "system-only" => Some(Self::SystemOnly),
+            "mic-plus-system" => Some(Self::MicPlusSystem),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeetingSourceLabel {
+    UserMic,
+    SystemAudio,
+    Mixed,
+}
+
+impl MeetingSourceLabel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UserMic => "user_mic",
+            Self::SystemAudio => "system_audio",
+            Self::Mixed => "mixed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeetingSourceStream {
+    pub label: MeetingSourceLabel,
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunks_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorder_stderr_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorder_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorder_identity: Option<SegmentedCaptureIdentity>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MeetingSourceMetadata {
+    pub mode: MeetSourceMode,
+    pub streams: Vec<MeetingSourceStream>,
+}
+
+impl MeetingSourceMetadata {
+    pub fn new(mode: MeetSourceMode, streams: Vec<MeetingSourceStream>) -> Self {
+        Self { mode, streams }
+    }
+
+    pub fn redacted(&self) -> Self {
+        Self {
+            mode: self.mode,
+            streams: self
+                .streams
+                .iter()
+                .map(|stream| MeetingSourceStream {
+                    label: stream.label,
+                    device: "<redacted>".to_string(),
+                    chunks_dir: None,
+                    recorder_stderr_path: None,
+                    recorder_pid: None,
+                    recorder_identity: None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn export_metadata(&self, retain_metadata: bool) -> Self {
+        Self {
+            mode: self.mode,
+            streams: self
+                .streams
+                .iter()
+                .map(|stream| MeetingSourceStream {
+                    label: stream.label,
+                    device: if retain_metadata {
+                        stream.device.clone()
+                    } else {
+                        "<redacted>".to_string()
+                    },
+                    chunks_dir: None,
+                    recorder_stderr_path: None,
+                    recorder_pid: None,
+                    recorder_identity: None,
+                })
+                .collect(),
+        }
+    }
+
+    pub fn summary(&self) -> String {
+        self.streams
+            .iter()
+            .map(|stream| format!("{} device {}", stream.label.as_str(), stream.device))
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
+
+    pub fn with_session_paths(
+        mut self,
+        chunks_dir: &Path,
+        recorder_stderr_path: &Path,
+        use_legacy_single_stream_paths: bool,
+    ) -> Self {
+        let multi_stream = self.streams.len() > 1;
+        for stream in &mut self.streams {
+            if use_legacy_single_stream_paths && !multi_stream {
+                stream.chunks_dir = Some(chunks_dir.display().to_string());
+                stream.recorder_stderr_path = Some(recorder_stderr_path.display().to_string());
+                continue;
+            }
+
+            let label = stream.label.as_str();
+            stream.chunks_dir = Some(chunks_dir.join(label).display().to_string());
+            stream.recorder_stderr_path = Some(
+                recorder_stderr_path
+                    .with_file_name(format!("capture-{label}.stderr"))
+                    .display()
+                    .to_string(),
+            );
+        }
+        self
+    }
+}
+
+impl Default for MeetingSourceMetadata {
+    fn default() -> Self {
+        Self {
+            mode: MeetSourceMode::MicOnly,
+            streams: vec![MeetingSourceStream {
+                label: MeetingSourceLabel::UserMic,
+                device: ":0".to_string(),
+                chunks_dir: None,
+                recorder_stderr_path: None,
+                recorder_pid: None,
+                recorder_identity: None,
+            }],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeetingStatus {
     Recording,
@@ -82,6 +243,8 @@ pub struct MeetingSessionState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recorder_identity: Option<SegmentedCaptureIdentity>,
     pub device: String,
+    #[serde(default)]
+    pub source: MeetingSourceMetadata,
     pub chunk_duration_ms: u64,
     pub sample_rate_hz: u32,
     pub channels: u16,
@@ -116,6 +279,7 @@ pub struct NewMeetingSession {
     pub mode: String,
     pub no_llm: bool,
     pub device: String,
+    pub source: MeetingSourceMetadata,
     pub chunk_duration_ms: u64,
     pub model: String,
     pub model_path: String,
@@ -141,6 +305,7 @@ pub fn new_recording_session(options: NewMeetingSession) -> MeetingSessionState 
         recorder_pid: None,
         recorder_identity: None,
         device: options.device,
+        source: options.source,
         chunk_duration_ms: options.chunk_duration_ms,
         sample_rate_hz: 16_000,
         channels: 1,
@@ -163,6 +328,8 @@ pub fn new_recording_session(options: NewMeetingSession) -> MeetingSessionState 
 pub struct MeetingChunk {
     pub index: usize,
     pub path: PathBuf,
+    pub source_label: MeetingSourceLabel,
+    pub source_device: String,
     pub start_ms: u64,
     pub duration_ms: u64,
 }
@@ -177,6 +344,8 @@ impl MeetingChunk {
 pub struct ChunkTranscript {
     pub chunk_index: usize,
     pub chunk_path: PathBuf,
+    pub source_label: MeetingSourceLabel,
+    pub source_device: String,
     pub chunk_start_ms: u64,
     pub chunk_duration_ms: u64,
     pub transcript: Transcript,
@@ -188,6 +357,8 @@ pub struct MeetingSegment {
     pub chunk_index: usize,
     pub start_ms: u64,
     pub end_ms: u64,
+    pub source_label: MeetingSourceLabel,
+    pub source_device: String,
     pub text: String,
     pub chunk_path: String,
 }
@@ -249,10 +420,23 @@ pub fn build_segments_from_chunk_transcripts(chunks: &[ChunkTranscript]) -> Segm
                 chunk_index: chunk.chunk_index,
                 start_ms,
                 end_ms,
+                source_label: chunk.source_label,
+                source_device: chunk.source_device.clone(),
                 text: text.to_string(),
                 chunk_path: chunk.chunk_path.display().to_string(),
             });
         }
+    }
+
+    segments.sort_by(|left, right| {
+        left.start_ms
+            .cmp(&right.start_ms)
+            .then_with(|| left.end_ms.cmp(&right.end_ms))
+            .then_with(|| left.source_label.as_str().cmp(right.source_label.as_str()))
+            .then_with(|| left.chunk_path.cmp(&right.chunk_path))
+    });
+    for (index, segment) in segments.iter_mut().enumerate() {
+        segment.segment_index = index;
     }
 
     let segmenting = if vad_available {
@@ -304,6 +488,8 @@ pub struct MeetingExportSession {
     pub duration_ms: u64,
     pub mode: String,
     pub source: String,
+    pub source_mode: MeetSourceMode,
+    pub source_streams: Vec<MeetingSourceStream>,
     pub chunk_duration_ms: u64,
     pub sample_rate_hz: u32,
     pub channels: u16,
@@ -319,6 +505,8 @@ pub struct MeetingSegmentExport {
     pub chunk_index: usize,
     pub start_ms: u64,
     pub end_ms: u64,
+    pub source_label: MeetingSourceLabel,
+    pub source_device: Option<String>,
     pub text: Option<String>,
     pub chunk_path: Option<String>,
 }
@@ -327,6 +515,7 @@ pub struct MeetingSegmentExport {
 pub struct MeetingExport {
     pub schema_version: String,
     pub session: MeetingExportSession,
+    pub source: MeetingSourceMetadata,
     pub retention: MeetingRetentionPolicy,
     pub segmenting: MeetingSegmenting,
     pub artifacts: MeetingArtifacts,
@@ -352,8 +541,9 @@ pub fn build_export(
         markdown_export: session.markdown_export_path.clone(),
         chunks_dir: retention.audio.then_some(session.chunks_dir.clone()),
     };
+    let source_metadata = session.source.export_metadata(retention.metadata);
     let source = if retention.metadata {
-        format!("microphone device {}", session.device)
+        source_metadata.summary()
     } else {
         "<redacted>".to_string()
     };
@@ -399,6 +589,8 @@ pub fn build_export(
             duration_ms: session.duration_ms.unwrap_or_default(),
             mode: processed.mode.clone(),
             source,
+            source_mode: session.source.mode,
+            source_streams: source_metadata.streams.clone(),
             chunk_duration_ms: session.chunk_duration_ms,
             sample_rate_hz: session.sample_rate_hz,
             channels: session.channels,
@@ -407,6 +599,7 @@ pub fn build_export(
             segment_count: segments.len(),
             inactivity_auto_stop: session.inactivity_auto_stop.clone(),
         },
+        source: source_metadata,
         retention: retention.clone(),
         segmenting,
         artifacts,
@@ -421,6 +614,8 @@ pub fn build_export(
                 chunk_index: segment.chunk_index,
                 start_ms: segment.start_ms,
                 end_ms: segment.end_ms,
+                source_label: segment.source_label,
+                source_device: retention.metadata.then(|| segment.source_device.clone()),
                 text: retention.transcripts.then_some(text),
                 chunk_path: retention.audio.then(|| segment.chunk_path.clone()),
             })
@@ -612,6 +807,18 @@ pub fn render_markdown(export: &MeetingExport) -> String {
     push_field(&mut markdown, "Source", &export.session.source);
     push_field(
         &mut markdown,
+        "Source mode",
+        export.session.source_mode.as_str(),
+    );
+    for stream in &export.source.streams {
+        push_field(
+            &mut markdown,
+            "Source stream",
+            &format!("{}: {}", stream.label.as_str(), stream.device),
+        );
+    }
+    push_field(
+        &mut markdown,
         "Source audio",
         &format!(
             "{} Hz, {} channel(s)",
@@ -696,9 +903,10 @@ pub fn render_markdown(export: &MeetingExport) -> String {
         for segment in &export.segments {
             let text = segment.text.as_deref().unwrap_or("<not retained>");
             markdown.push_str(&format!(
-                "- [{} - {}] {}\n",
+                "- [{} - {}] {}: {}\n",
                 format_offset(segment.start_ms),
                 format_offset(segment.end_ms),
+                segment.source_label.as_str(),
                 text
             ));
         }
@@ -724,6 +932,7 @@ struct JsonlSessionRecord<'a> {
     record_type: &'static str,
     schema_version: &'a str,
     session: &'a MeetingExportSession,
+    source: &'a MeetingSourceMetadata,
     retention: &'a MeetingRetentionPolicy,
     segmenting: &'a MeetingSegmenting,
     artifacts: &'a MeetingArtifacts,
@@ -769,6 +978,11 @@ impl FileMeetingStore {
 
     pub fn create_session(&self, session: &MeetingSessionState) -> Result<(), ComlinkError> {
         fs::create_dir_all(Path::new(&session.chunks_dir))?;
+        for stream in &session.source.streams {
+            if let Some(chunks_dir) = &stream.chunks_dir {
+                fs::create_dir_all(chunks_dir)?;
+            }
+        }
         self.save_session(session)?;
         fs::write(self.active_file(), &session.session_id)?;
         Ok(())
@@ -836,40 +1050,68 @@ impl FileMeetingStore {
         session: &MeetingSessionState,
         duration_probe: impl Fn(&Path) -> Option<u64>,
     ) -> Result<Vec<MeetingChunk>, ComlinkError> {
-        let chunks_dir = Path::new(&session.chunks_dir);
-        if !chunks_dir.is_dir() {
-            return Ok(Vec::new());
+        self.discover_source_chunks(session, duration_probe)
+    }
+
+    pub fn discover_source_chunks(
+        &self,
+        session: &MeetingSessionState,
+        duration_probe: impl Fn(&Path) -> Option<u64>,
+    ) -> Result<Vec<MeetingChunk>, ComlinkError> {
+        let mut chunks = Vec::new();
+        for stream in &session.source.streams {
+            let stream_chunks_dir = stream
+                .chunks_dir
+                .as_deref()
+                .unwrap_or(session.chunks_dir.as_str());
+            chunks.extend(discover_chunks_in_dir(
+                Path::new(stream_chunks_dir),
+                stream.label,
+                &stream.device,
+                session.chunk_duration_ms,
+                &duration_probe,
+            )?);
         }
-
-        let mut paths = fs::read_dir(chunks_dir)?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| {
-                entry
-                    .file_type()
-                    .map(|kind| kind.is_file())
-                    .unwrap_or(false)
-            })
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("wav"))
-            .collect::<Vec<_>>();
-        paths.sort();
-
-        let mut start_ms = 0;
-        let mut chunks = Vec::with_capacity(paths.len());
-        for (index, path) in paths.into_iter().enumerate() {
-            let duration_ms = duration_probe(&path)
-                .filter(|duration| *duration > 0)
-                .unwrap_or(session.chunk_duration_ms);
-            chunks.push(MeetingChunk {
-                index,
-                path,
-                start_ms,
-                duration_ms,
-            });
-            start_ms = start_ms.saturating_add(duration_ms);
+        chunks.sort_by(|left, right| {
+            left.start_ms
+                .cmp(&right.start_ms)
+                .then_with(|| left.source_label.as_str().cmp(right.source_label.as_str()))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        for (index, chunk) in chunks.iter_mut().enumerate() {
+            chunk.index = index;
         }
-
         Ok(chunks)
+    }
+
+    pub fn discover_chunks_for_stream(
+        &self,
+        session: &MeetingSessionState,
+        stream: &MeetingSourceStream,
+        duration_probe: impl Fn(&Path) -> Option<u64>,
+    ) -> Result<Vec<MeetingChunk>, ComlinkError> {
+        let stream_chunks_dir = stream
+            .chunks_dir
+            .as_deref()
+            .unwrap_or(session.chunks_dir.as_str());
+        discover_chunks_in_dir(
+            Path::new(stream_chunks_dir),
+            stream.label,
+            &stream.device,
+            session.chunk_duration_ms,
+            duration_probe,
+        )
+    }
+
+    pub fn delete_unretained_chunks(
+        &self,
+        session: &MeetingSessionState,
+    ) -> Result<(), ComlinkError> {
+        let chunks_dir = Path::new(&session.chunks_dir);
+        if chunks_dir.exists() {
+            fs::remove_dir_all(chunks_dir)?;
+        }
+        Ok(())
     }
 
     pub fn write_segments_jsonl(&self, export: &MeetingExport) -> Result<(), ComlinkError> {
@@ -882,6 +1124,7 @@ impl FileMeetingStore {
             record_type: "session",
             schema_version: &export.schema_version,
             session: &export.session,
+            source: &export.source,
             retention: &export.retention,
             segmenting: &export.segmenting,
             artifacts: &export.artifacts,
@@ -949,11 +1192,7 @@ impl FileMeetingStore {
     }
 
     pub fn delete_chunks(&self, session: &MeetingSessionState) -> Result<(), ComlinkError> {
-        let chunks_dir = Path::new(&session.chunks_dir);
-        if chunks_dir.exists() {
-            fs::remove_dir_all(chunks_dir)?;
-        }
-        Ok(())
+        self.delete_unretained_chunks(session)
     }
 
     fn active_file(&self) -> PathBuf {
@@ -963,6 +1202,50 @@ impl FileMeetingStore {
     fn session_file(&self, id: &str) -> PathBuf {
         self.root.join(id).join("session.json")
     }
+}
+
+fn discover_chunks_in_dir(
+    chunks_dir: &Path,
+    source_label: MeetingSourceLabel,
+    source_device: &str,
+    chunk_duration_ms: u64,
+    duration_probe: impl Fn(&Path) -> Option<u64>,
+) -> Result<Vec<MeetingChunk>, ComlinkError> {
+    if !chunks_dir.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut paths = fs::read_dir(chunks_dir)?
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or(false)
+        })
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("wav"))
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    let mut start_ms = 0;
+    let mut chunks = Vec::with_capacity(paths.len());
+    for (index, path) in paths.into_iter().enumerate() {
+        let duration_ms = duration_probe(&path)
+            .filter(|duration| *duration > 0)
+            .unwrap_or(chunk_duration_ms);
+        chunks.push(MeetingChunk {
+            index,
+            path,
+            source_label,
+            source_device: source_device.to_string(),
+            start_ms,
+            duration_ms,
+        });
+        start_ms = start_ms.saturating_add(duration_ms);
+    }
+
+    Ok(chunks)
 }
 
 #[derive(Debug, Clone)]
@@ -1020,6 +1303,8 @@ mod tests {
             ChunkTranscript {
                 chunk_index: 0,
                 chunk_path: PathBuf::from("chunk-00000.wav"),
+                source_label: MeetingSourceLabel::UserMic,
+                source_device: ":0".to_string(),
                 chunk_start_ms: 0,
                 chunk_duration_ms: 30_000,
                 transcript: transcript("alpha", 30_000, Vec::new()),
@@ -1027,6 +1312,8 @@ mod tests {
             ChunkTranscript {
                 chunk_index: 1,
                 chunk_path: PathBuf::from("chunk-00001.wav"),
+                source_label: MeetingSourceLabel::UserMic,
+                source_device: ":0".to_string(),
                 chunk_start_ms: 30_000,
                 chunk_duration_ms: 30_000,
                 transcript: transcript("bravo", 30_000, Vec::new()),
@@ -1049,6 +1336,8 @@ mod tests {
         let chunks = vec![ChunkTranscript {
             chunk_index: 2,
             chunk_path: PathBuf::from("chunk-00002.wav"),
+            source_label: MeetingSourceLabel::UserMic,
+            source_device: ":0".to_string(),
             chunk_start_ms: 60_000,
             chunk_duration_ms: 30_000,
             transcript: transcript(
@@ -1091,6 +1380,7 @@ mod tests {
             session_id: "meeting-1".to_string(),
             no_llm: true,
             device: ":0".to_string(),
+            source: MeetingSourceMetadata::default(),
             chunk_duration_ms: 30_000,
             model: "/models/ggml.bin".to_string(),
             model_path: "/models/ggml.bin".to_string(),
@@ -1117,6 +1407,8 @@ mod tests {
             chunk_index: 0,
             start_ms: 0,
             end_ms: 100,
+            source_label: MeetingSourceLabel::UserMic,
+            source_device: ":0".to_string(),
             text: "secret".to_string(),
             chunk_path: "/tmp/session/chunks/chunk-00000.wav".to_string(),
         }];
@@ -1153,6 +1445,7 @@ mod tests {
             session_id: "meeting-1".to_string(),
             no_llm: true,
             device: ":0".to_string(),
+            source: MeetingSourceMetadata::default(),
             chunk_duration_ms: 30_000,
             model: "/models/ggml-tiny.en.bin".to_string(),
             model_path: "/models/ggml-tiny.en.bin".to_string(),
@@ -1183,6 +1476,8 @@ mod tests {
             chunk_index: 0,
             start_ms: 0,
             end_ms: 180_000,
+            source_label: MeetingSourceLabel::UserMic,
+            source_device: ":0".to_string(),
             text: repeated.to_string(),
             chunk_path: "/tmp/session/chunks/chunk-00000.wav".to_string(),
         }];

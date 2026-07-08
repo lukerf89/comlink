@@ -298,6 +298,11 @@ fn print_report(report: &DoctorReport) {
         }
     }
     eprintln!("  data_dir: {}", report.paths.data_dir);
+    eprintln!(
+        "  system_audio_permissions: microphone={}; routing={}",
+        report.system_audio.permissions.microphone.status,
+        report.system_audio.permissions.system_audio_routing.status
+    );
     eprintln!("  privacy: {}", report.privacy.posture);
 }
 

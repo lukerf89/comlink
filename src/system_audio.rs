@@ -26,6 +26,7 @@ pub struct SystemAudioReport {
     pub remediation: String,
     pub macos_version: Option<String>,
     pub dependency: SystemAudioDependency,
+    pub permissions: SystemAudioPermissions,
     pub native_core_audio_tap: NativeCoreAudioTap,
     pub source_metadata: SourceMetadataPrototype,
 }
@@ -36,6 +37,19 @@ pub struct SystemAudioDependency {
     pub present: bool,
     pub device_name: Option<String>,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemAudioPermissions {
+    pub microphone: PermissionDiagnostic,
+    pub system_audio_routing: PermissionDiagnostic,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PermissionDiagnostic {
+    pub status: String,
+    pub detail: String,
+    pub remediation: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -70,6 +84,12 @@ pub trait SystemAudioProbe {
     fn snapshot(&self) -> SystemAudioProbeSnapshot;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemAudioCapturePlan {
+    pub device_name: String,
+    pub avfoundation_input: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct RealSystemAudioProbe {
     ffmpeg: Option<PathBuf>,
@@ -82,6 +102,12 @@ impl RealSystemAudioProbe {
                 DependencyState::Found(path) => Some(path.clone()),
                 _ => None,
             },
+        }
+    }
+
+    pub fn from_ffmpeg(ffmpeg: PathBuf) -> Self {
+        Self {
+            ffmpeg: Some(ffmpeg),
         }
     }
 }
@@ -129,6 +155,31 @@ pub fn inspect(dependencies: &DependencyReport) -> SystemAudioReport {
 
 pub fn inspect_with_probe(probe: &impl SystemAudioProbe) -> SystemAudioReport {
     report_from_snapshot(probe.snapshot(), preferred_device_name())
+}
+
+pub fn resolve_capture_plan(
+    probe: &impl SystemAudioProbe,
+) -> Result<SystemAudioCapturePlan, String> {
+    let report = inspect_with_probe(probe);
+    let Some(device_name) = report.dependency.device_name else {
+        return Err(format!(
+            "{} {}",
+            report.detail.trim_end_matches('.'),
+            report.remediation
+        ));
+    };
+    Ok(SystemAudioCapturePlan {
+        avfoundation_input: avfoundation_audio_input(&device_name),
+        device_name,
+    })
+}
+
+pub fn avfoundation_audio_input(device_name: &str) -> String {
+    if device_name.starts_with(':') {
+        device_name.to_string()
+    } else {
+        format!(":{device_name}")
+    }
 }
 
 fn report_from_snapshot(
@@ -186,6 +237,22 @@ fn report_from_snapshot(
             device_name: matching_device,
             detail: "Chosen Phase 8 dependency for local Zoom/Teams system audio routing."
                 .to_string(),
+        },
+        permissions: SystemAudioPermissions {
+            microphone: PermissionDiagnostic {
+                status: "manual-check".to_string(),
+                detail: "Mic capture uses FFmpeg AVFoundation and requires the terminal or parent app to have macOS Microphone permission.".to_string(),
+                remediation: "Grant Microphone permission in macOS Privacy & Security to the terminal or app launching Comlink; rerun `comlink meet start --source mic-only` as a smoke test.".to_string(),
+            },
+            system_audio_routing: PermissionDiagnostic {
+                status: if dependency_present { "device-visible" } else { "setup-required" }.to_string(),
+                detail: if dependency_present {
+                    "BlackHole is visible as a local audio input; Comlink still depends on the user routing Teams/Zoom output into BlackHole.".to_string()
+                } else {
+                    "BlackHole is not visible as a local audio input, so system audio cannot be captured through the Phase 9 adapter.".to_string()
+                },
+                remediation: "Install BlackHole 2ch, include it in a Multi-Output or Aggregate Device with your speakers/headphones, then select that output in macOS or the meeting app.".to_string(),
+            },
         },
         native_core_audio_tap: NativeCoreAudioTap {
             supported_by_os: native_supported,
@@ -468,6 +535,29 @@ mod tests {
             report.dependency.device_name.as_deref(),
             Some("BlackHole 16ch")
         );
+    }
+
+    #[test]
+    fn capture_plan_uses_blackhole_as_avfoundation_audio_input() {
+        struct Probe;
+
+        impl SystemAudioProbe for Probe {
+            fn snapshot(&self) -> SystemAudioProbeSnapshot {
+                SystemAudioProbeSnapshot {
+                    platform: Platform::MacOs(Some(MacOsVersion::new(14, 6, 1))),
+                    audio_input_devices: vec![
+                        "MacBook Pro Microphone".to_string(),
+                        "BlackHole 2ch".to_string(),
+                    ],
+                    probe_error: None,
+                }
+            }
+        }
+
+        let plan = resolve_capture_plan(&Probe).unwrap();
+
+        assert_eq!(plan.device_name, "BlackHole 2ch");
+        assert_eq!(plan.avfoundation_input, ":BlackHole 2ch");
     }
 
     #[test]

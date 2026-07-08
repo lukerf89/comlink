@@ -1,0 +1,1 @@
+error: audio capture failed: system-audio capture requires a BlackHole input device; got `MacBook Pro Microphone`. Install BlackHole 2ch or set COMLINK_SYSTEM_AUDIO_DEVICE to the exact BlackHole AVFoundation input name.
