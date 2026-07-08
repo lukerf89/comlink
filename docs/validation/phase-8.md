@@ -114,11 +114,15 @@ production capture. Native Core Audio taps and ScreenCaptureKit remain future
 options, but both need a stronger macOS permission/app identity story than this
 phase should ship.
 
-Open questions for the human gate:
+Human gate decisions (2026-07-08):
 
-1. Is requiring a local virtual-audio dependency acceptable for Phase 9?
-2. Should the default documented setup be BlackHole 2ch or BlackHole 16ch?
-3. Which app should be validated first with live hardware: Zoom or Teams?
+1. Requiring a local virtual-audio dependency **is acceptable** for Phase 9.
+2. **BlackHole 2ch is the documented default** (detection stays permissive for
+   16ch); rationale in the decision record.
+3. **Microsoft Teams is validated first** on live hardware; Zoom follows.
+
+Still open, deferred into Phase 9 (non-blocking):
+
 4. Should Comlink eventually invest in a signed macOS helper/app for native Core
    Audio taps?
 5. What consent language should appear before online meeting capture?
@@ -139,12 +143,14 @@ Open questions for the human gate:
 
 ## Manual Test Checklist
 
-1. Review `docs/decisions/system-audio-macos.md`.
-2. Confirm whether requiring a local BlackHole dependency is acceptable for
-   Phase 9.
-3. Confirm whether BlackHole 2ch or BlackHole 16ch should be the documented
-   default.
-4. Confirm which app matters first for Phase 9 live validation: Zoom or Teams.
+Decisions 1–4 below were resolved at the gate (BlackHole acceptable; 2ch default;
+Teams first). The remaining live-hardware steps stay as the Phase 9 validation
+checklist.
+
+1. Review `docs/decisions/system-audio-macos.md`. (done)
+2. Requiring a local BlackHole dependency is acceptable for Phase 9. (confirmed)
+3. BlackHole 2ch is the documented default. (confirmed)
+4. Microsoft Teams is validated first for Phase 9 live validation. (confirmed)
 5. Run `cargo run -- doctor --format json` before installing BlackHole and
    confirm `system_audio.status` is `missing-dependency` with actionable
    remediation.

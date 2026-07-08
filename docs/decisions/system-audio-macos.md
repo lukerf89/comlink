@@ -4,11 +4,17 @@ Date: 2026-07-08
 Phase: 8 - Zoom/Teams System Audio Spike
 Linear: LF-51
 
+Status: **Accepted** — human gate decisions recorded below (2026-07-08).
+
 ## Decision
 
 For the first online-meeting capture build, Comlink should require a documented
-local virtual-audio dependency: BlackHole 2ch or 16ch. Phase 8 adds only
-diagnostics and documentation. It does not add production capture.
+local virtual-audio dependency: **BlackHole 2ch (documented default)**. Detection
+also accepts BlackHole 16ch when a user already runs it, but 2ch is the
+recommended install and the configuration Phase 9 documents and validates first.
+**Microsoft Teams is the first app validated on live hardware**, with Zoom
+following. Phase 8 adds only diagnostics and documentation. It does not add
+production capture.
 
 Recommended Phase 9 shape:
 
@@ -275,11 +281,22 @@ system-audio capture is not yet shipped.
 - Bundling a virtual audio driver: rejected for now pending license, installer,
   update, and user-trust review.
 
-## Open Questions For Human Gate
+## Human Gate Decisions (2026-07-08)
 
-1. Is requiring a local virtual-audio dependency acceptable for Phase 9?
-2. Should Phase 9 document BlackHole 2ch as the default, or support 16ch first?
-3. Which app should be validated first with live hardware: Zoom or Teams?
+Resolved at the Phase 8 manual gate:
+
+1. **Requiring a local virtual-audio dependency is acceptable.** Phase 9 may
+   depend on the user installing BlackHole.
+2. **BlackHole 2ch is the documented default.** Meeting audio from Zoom/Teams is
+   mono/stereo and Comlink downmixes to 16 kHz mono for local ASR, so the extra
+   channels in 16ch add routing/CPU overhead with no benefit for this use case.
+   Detection remains permissive (2ch or 16ch, or `COMLINK_SYSTEM_AUDIO_DEVICE`)
+   so a user already on 16ch is not blocked, but setup docs and validation target
+   2ch.
+3. **Microsoft Teams is validated first** on live hardware; Zoom follows.
+
+Still open, to be answered before/within Phase 9 (not blocking this spike):
+
 4. Is a signed macOS helper/app acceptable later if the project wants to move
    from BlackHole to native Core Audio taps?
 5. What user-facing consent language should Comlink show before online meeting
