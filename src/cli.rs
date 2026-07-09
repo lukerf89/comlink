@@ -1228,7 +1228,7 @@ fn session_recorder_identities(
 
 fn session_recorder_is_verified_running(session: &meet::MeetingSessionState) -> bool {
     let identities = session_recorder_identities(session);
-    !identities.is_empty() && identities.iter().all(record::segmented_capture_is_running)
+    !identities.is_empty() && identities.iter().any(record::segmented_capture_is_running)
 }
 
 fn reclaim_inactive_recording_session(
@@ -1258,6 +1258,36 @@ fn stop_session_recorder(
         stopped_any |= record::stop_segmented_capture(&identity, timeout)?;
     }
     Ok(stopped_any)
+}
+
+fn recorder_stderr_paths(session: &meet::MeetingSessionState) -> Vec<String> {
+    let mut paths = Vec::new();
+    for stream in &session.source.streams {
+        if let Some(path) = &stream.recorder_stderr_path {
+            if !paths.contains(path) {
+                paths.push(path.clone());
+            }
+        }
+    }
+
+    if paths.is_empty() && !session.recorder_stderr_path.is_empty() {
+        paths.push(session.recorder_stderr_path.clone());
+    }
+
+    paths
+}
+
+fn no_meeting_chunks_error(session: &meet::MeetingSessionState) -> ComlinkError {
+    let paths = recorder_stderr_paths(session);
+    let stderr_hint = match paths.as_slice() {
+        [] => "no recorder stderr log was recorded".to_string(),
+        [path] => format!("see recorder stderr log: {path}"),
+        _ => format!("see recorder stderr logs: {}", paths.join(", ")),
+    };
+
+    ComlinkError::AudioCaptureFailed(format!(
+        "meeting recording produced no chunk files; {stderr_hint}"
+    ))
 }
 
 struct MeetStopOptions {
@@ -1298,10 +1328,7 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
     store.clear_active_if_matches(&session.session_id)?;
 
     if preliminary_chunks.is_empty() {
-        return Err(ComlinkError::AudioCaptureFailed(format!(
-            "meeting recording produced no chunk files; see {}",
-            session.recorder_stderr_path
-        )));
+        return Err(no_meeting_chunks_error(&session));
     }
 
     let runtime = deps::runtime_from_model_path(PathBuf::from(&session.model_path))?;
@@ -1309,10 +1336,7 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
         audio::probe_duration_ms(path, runtime.ffprobe.as_deref())
     })?;
     if chunks.is_empty() {
-        return Err(ComlinkError::AudioCaptureFailed(format!(
-            "meeting recording produced no chunk files; see {}",
-            session.recorder_stderr_path
-        )));
+        return Err(no_meeting_chunks_error(&session));
     }
 
     let engine = WhisperCppEngine {

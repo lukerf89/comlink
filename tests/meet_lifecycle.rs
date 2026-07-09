@@ -72,10 +72,12 @@ fi
 
 chunks="${COMLINK_MOCK_MEETING_CHUNKS:-4}"
 mkdir -p "$(dirname "$out")"
-for index in $(seq 0 $((chunks - 1))); do
-  chunk="$(printf "$out" "$index")"
-  printf 'mock wav %s\n' "$index" > "$chunk"
-done
+if [ "$chunks" -gt 0 ]; then
+  for index in $(seq 0 $((chunks - 1))); do
+    chunk="$(printf "$out" "$index")"
+    printf 'mock wav %s\n' "$index" > "$chunk"
+  done
+fi
 
 trap 'exit 0' INT TERM
 while true; do
@@ -365,6 +367,112 @@ fn meet_start_cleans_up_mic_recorder_when_system_recorder_fails() {
         .join("meetings")
         .join("active-session")
         .exists());
+    assert_no_process_contains(&runtime.data.display().to_string());
+}
+
+#[test]
+fn meet_start_treats_partially_live_multi_stream_session_as_active() {
+    let runtime = MockRuntime::new();
+
+    let first = runtime.run(
+        &[
+            "meet",
+            "start",
+            "--format",
+            "json",
+            "--source",
+            "mic-plus-system",
+            "--chunk-seconds",
+            "30",
+            "--no-llm",
+        ],
+        1,
+        "",
+    );
+    assert_success(&first);
+    let first_json = json_stdout(&first);
+    let recorders = first_json["recorders"].as_array().unwrap();
+    for recorder in recorders {
+        wait_for_chunks(Path::new(recorder["chunks_dir"].as_str().unwrap()), 1);
+    }
+
+    let killed_pid = recorders
+        .iter()
+        .find(|recorder| recorder["source_label"] == "user_mic")
+        .unwrap()["pid"]
+        .as_u64()
+        .unwrap() as u32;
+    let kill = Command::new("kill")
+        .arg("-KILL")
+        .arg(killed_pid.to_string())
+        .status()
+        .unwrap();
+    assert!(kill.success());
+    wait_until_not_running(killed_pid);
+
+    let second = runtime.run(
+        &[
+            "meet",
+            "start",
+            "--format",
+            "json",
+            "--source",
+            "mic-plus-system",
+            "--chunk-seconds",
+            "30",
+            "--no-llm",
+        ],
+        1,
+        "",
+    );
+    assert!(!second.status.success());
+    assert!(
+        String::from_utf8_lossy(&second.stderr).contains("meeting session is already recording")
+    );
+
+    let session_id = first_json["session_id"].as_str().unwrap();
+    let active_id = fs::read_to_string(runtime.data.join("meetings").join("active-session"))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(active_id, session_id);
+
+    let stop = runtime.run(&["meet", "stop", session_id, "--format", "json"], 1, "");
+    assert_success(&stop);
+    assert_no_process_contains(&runtime.data.display().to_string());
+}
+
+#[test]
+fn meet_stop_no_chunks_error_lists_multi_stream_stderr_logs() {
+    let runtime = MockRuntime::new();
+
+    let start = runtime.run(
+        &[
+            "meet",
+            "start",
+            "--format",
+            "json",
+            "--source",
+            "mic-plus-system",
+            "--chunk-seconds",
+            "30",
+            "--no-llm",
+        ],
+        0,
+        "",
+    );
+    assert_success(&start);
+    let start_json = json_stdout(&start);
+
+    let session_id = start_json["session_id"].as_str().unwrap();
+    let stop = runtime.run(&["meet", "stop", session_id, "--format", "json"], 0, "");
+
+    assert!(!stop.status.success());
+    let stderr = String::from_utf8_lossy(&stop.stderr);
+    assert!(stderr.contains("meeting recording produced no chunk files"));
+    assert!(stderr.contains("capture-user_mic.stderr"));
+    assert!(stderr.contains("capture-system_audio.stderr"));
+    assert!(!stderr.contains("capture.stderr"));
     assert_no_process_contains(&runtime.data.display().to_string());
 }
 
