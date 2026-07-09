@@ -1,0 +1,1 @@
+error: audio capture failed: No BlackHole virtual audio input was detected in AVFoundation devices Install BlackHole 2ch or 16ch, create a Multi-Output or Aggregate Device for speakers plus BlackHole, and rerun doctor. If COMLINK_SYSTEM_AUDIO_DEVICE is set, it must name a detected BlackHole input.

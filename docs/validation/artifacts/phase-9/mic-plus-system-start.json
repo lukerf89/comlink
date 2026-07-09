@@ -1,0 +1,62 @@
+{
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "s1783551811886000000-28948-0",
+  "status": "recording",
+  "elapsed_ms": 221,
+  "recorder_pid": 28962,
+  "recorders": [
+    {
+      "source_label": "user_mic",
+      "device": ":0",
+      "pid": 28962,
+      "chunks_dir": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/chunks/user_mic",
+      "stderr_path": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/capture-user_mic.stderr"
+    },
+    {
+      "source_label": "system_audio",
+      "device": "BlackHole 2ch",
+      "pid": 28972,
+      "chunks_dir": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/chunks/system_audio",
+      "stderr_path": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/capture-system_audio.stderr"
+    }
+  ],
+  "source": {
+    "mode": "mic-plus-system",
+    "streams": [
+      {
+        "label": "user_mic",
+        "device": ":0",
+        "chunks_dir": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/chunks/user_mic",
+        "recorder_stderr_path": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/capture-user_mic.stderr",
+        "recorder_pid": 28962,
+        "recorder_identity": {
+          "pid": 28962,
+          "output_pattern": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/chunks/user_mic/chunk-%05d.wav",
+          "process_started_at": "Wed Jul  8 18:03:31 2026"
+        }
+      },
+      {
+        "label": "system_audio",
+        "device": "BlackHole 2ch",
+        "chunks_dir": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/chunks/system_audio",
+        "recorder_stderr_path": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/capture-system_audio.stderr",
+        "recorder_pid": 28972,
+        "recorder_identity": {
+          "pid": 28972,
+          "output_pattern": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/chunks/system_audio/chunk-%05d.wav",
+          "process_started_at": "Wed Jul  8 18:03:31 2026"
+        }
+      }
+    ]
+  },
+  "session_dir": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0",
+  "chunks_dir": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/chunks",
+  "segments_jsonl": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/segments.jsonl",
+  "json_export": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/transcript.json",
+  "markdown_export": "<tmp>/comlink-data/meetings/s1783551811886000000-28948-0/transcript.md",
+  "consent_reminder": "Consent reminder: confirm everyone present knows this meeting is being recorded and transcribed.",
+  "inactivity_auto_stop": {
+    "enabled": false,
+    "reason": "not enabled in Phase 7; the current capture adapter has no reliable realtime silence signal"
+  }
+}

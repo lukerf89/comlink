@@ -17,7 +17,7 @@ use crate::{
     output::{self, ContextMetadata, OutputFormat},
     record,
     storage::{self, PruneResult, StoredSegment, StoredSession, StoredSessionSummary},
-    text,
+    system_audio, text,
 };
 
 const DEFAULT_RECORD_DEVICE: &str = ":0";
@@ -156,7 +156,7 @@ enum Command {
         no_llm: bool,
     },
 
-    /// Capture and export in-person meeting transcripts.
+    /// Capture and export local meeting transcripts.
     Meet {
         #[command(subcommand)]
         command: MeetCommand,
@@ -359,7 +359,7 @@ enum PrivacyCommand {
 
 #[derive(Debug, Subcommand)]
 enum MeetCommand {
-    /// Start a chunked microphone meeting recording.
+    /// Start a chunked meeting recording.
     Start {
         /// Status output format.
         #[arg(long, value_enum, default_value = "text")]
@@ -376,6 +376,14 @@ enum MeetCommand {
         /// FFmpeg AVFoundation input device. Defaults to COMLINK_RECORD_DEVICE or :0.
         #[arg(long)]
         device: Option<String>,
+
+        /// Meeting capture source. Defaults to Phase 7-compatible mic-only.
+        #[arg(long, value_parser = ["mic-only", "system-only", "mic-plus-system"], default_value = "mic-only")]
+        source: String,
+
+        /// BlackHole FFmpeg AVFoundation audio input. Defaults to COMLINK_SYSTEM_AUDIO_DEVICE or detected BlackHole.
+        #[arg(long)]
+        system_device: Option<String>,
 
         /// Chunk size for long-form capture.
         #[arg(long, default_value_t = DEFAULT_MEETING_CHUNK_SECONDS)]
@@ -803,6 +811,8 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
         PrivacyCommand::Audit { format } => {
             let resolved = config::load(CliConfigOverrides::default())?;
             let selected_model = config::selected_model_path(&resolved.config);
+            let dependencies = deps::inspect_with_model_path(selected_model.clone());
+            let system_audio_report = system_audio::inspect(&dependencies);
             let audit = PrivacyAudit {
                 history_enabled: resolved.config.history_enabled,
                 retention: resolved.config.retention.clone(),
@@ -817,6 +827,20 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
                     .unwrap_or(false),
                 asr: "local whisper.cpp".to_string(),
                 llm: llm_privacy_status(&resolved.config.llm),
+                system_audio: PrivacySystemAudio {
+                    strategy: system_audio_report.strategy,
+                    available: system_audio_report.available,
+                    status: system_audio_report.status,
+                    device_name: resolved
+                        .config
+                        .retention
+                        .metadata
+                        .then_some(system_audio_report.dependency.device_name)
+                        .flatten(),
+                    microphone_permission: system_audio_report.permissions.microphone.detail,
+                    routing_permission: system_audio_report.permissions.system_audio_routing.detail,
+                    raw_audio_retained: resolved.config.retention.audio,
+                },
             };
             print_privacy_audit(&audit, format)
         }
@@ -830,6 +854,8 @@ fn run_meet(command: MeetCommand) -> Result<(), ComlinkError> {
             mode,
             model,
             device,
+            source,
+            system_device,
             chunk_seconds,
             no_llm,
         } => meet_start(MeetStartOptions {
@@ -837,6 +863,8 @@ fn run_meet(command: MeetCommand) -> Result<(), ComlinkError> {
             mode: &mode,
             model,
             device,
+            source: &source,
+            system_device,
             chunk_seconds,
             no_llm,
         }),
@@ -858,6 +886,8 @@ struct MeetStartOptions<'a> {
     mode: &'a str,
     model: Option<PathBuf>,
     device: Option<String>,
+    source: &'a str,
+    system_device: Option<String>,
     chunk_seconds: u64,
     no_llm: bool,
 }
@@ -868,6 +898,8 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
         mode,
         model,
         device,
+        source,
+        system_device,
         chunk_seconds,
         no_llm,
     } = options;
@@ -879,6 +911,13 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
     let device = device
         .or_else(|| env::var("COMLINK_RECORD_DEVICE").ok())
         .unwrap_or_else(|| DEFAULT_RECORD_DEVICE.to_string());
+    let source_mode =
+        meet::MeetSourceMode::parse(source).ok_or_else(|| ComlinkError::InvalidConfigValue {
+            name: "meet start --source",
+            value: source.to_string(),
+        })?;
+    let source_metadata =
+        build_meeting_source_metadata(source_mode, &device, system_device, &runtime.ffmpeg)?;
     let chunk_seconds = chunk_seconds.max(1);
     let store = meet::FileMeetingStore::new(&resolved.paths);
 
@@ -895,11 +934,17 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
     }
 
     let paths = store.paths_for_new_session();
+    let source_metadata = source_metadata.with_session_paths(
+        &paths.chunks_dir,
+        &paths.recorder_stderr_path,
+        source_mode == meet::MeetSourceMode::MicOnly,
+    );
     let mut session = meet::new_recording_session(meet::NewMeetingSession {
         session_id: paths.session_id,
         mode: mode.to_string(),
         no_llm,
         device: device.clone(),
+        source: source_metadata,
         chunk_duration_ms: chunk_seconds.saturating_mul(1000),
         model: runtime.whisper_model.display().to_string(),
         model_path: runtime.whisper_model.display().to_string(),
@@ -913,21 +958,14 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
     });
 
     store.create_session(&session)?;
-    let capture = match record::start_segmented_capture(record::SegmentedCaptureOptions {
-        ffmpeg: &runtime.ffmpeg,
-        device: &device,
-        chunks_dir: Path::new(&session.chunks_dir),
-        stderr_path: Path::new(&session.recorder_stderr_path),
-        chunk_duration: Duration::from_secs(chunk_seconds),
-    }) {
-        Ok(capture) => capture,
+    let captures = match start_session_recorders(&runtime.ffmpeg, &session, chunk_seconds) {
+        Ok(captures) => captures,
         Err(error) => {
             store.clear_active_if_matches(&session.session_id)?;
             return Err(error);
         }
     };
-    session.recorder_pid = Some(capture.pid);
-    session.recorder_identity = Some(capture.identity.clone());
+    apply_started_recorders(&mut session, captures);
     store.save_session(&session)?;
 
     let consent_reminder =
@@ -936,40 +974,261 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
     print_meet_start(
         &MeetStartStatus {
             schema_version: meet::MEETING_SCHEMA_VERSION,
-            session_id: session.session_id,
+            session_id: session.session_id.clone(),
             status: meet::MeetingStatus::Recording.as_str(),
             elapsed_ms: elapsed_since(session.started_at_ms),
-            recorder_pid: capture.pid,
-            session_dir: session.session_dir,
-            chunks_dir: session.chunks_dir,
-            segments_jsonl: session.segments_jsonl_path,
-            json_export: session.json_export_path,
-            markdown_export: session.markdown_export_path,
+            recorder_pid: session.recorder_pid.unwrap_or_default(),
+            recorders: session_recorders_status(&session),
+            source: session.source.clone(),
+            session_dir: session.session_dir.clone(),
+            chunks_dir: session.chunks_dir.clone(),
+            segments_jsonl: session.segments_jsonl_path.clone(),
+            json_export: session.json_export_path.clone(),
+            markdown_export: session.markdown_export_path.clone(),
             consent_reminder,
-            inactivity_auto_stop: session.inactivity_auto_stop,
+            inactivity_auto_stop: session.inactivity_auto_stop.clone(),
         },
         format,
     )
 }
 
-fn session_recorder_identity(
-    session: &meet::MeetingSessionState,
-) -> Option<record::SegmentedCaptureIdentity> {
-    if let Some(identity) = &session.recorder_identity {
-        return Some(identity.clone());
+fn build_meeting_source_metadata(
+    mode: meet::MeetSourceMode,
+    mic_device: &str,
+    system_device: Option<String>,
+    ffmpeg: &Path,
+) -> Result<meet::MeetingSourceMetadata, ComlinkError> {
+    let system_device = if matches!(
+        mode,
+        meet::MeetSourceMode::SystemOnly | meet::MeetSourceMode::MicPlusSystem
+    ) {
+        Some(resolve_system_audio_device(system_device, ffmpeg)?)
+    } else {
+        None
+    };
+
+    if mode == meet::MeetSourceMode::MicPlusSystem
+        && system_device
+            .as_deref()
+            .is_some_and(|device| same_audio_device(device, mic_device))
+    {
+        return Ok(meet::MeetingSourceMetadata::new(
+            mode,
+            vec![meet::MeetingSourceStream {
+                label: meet::MeetingSourceLabel::Mixed,
+                device: mic_device.to_string(),
+                chunks_dir: None,
+                recorder_stderr_path: None,
+                recorder_pid: None,
+                recorder_identity: None,
+            }],
+        ));
     }
 
-    session.recorder_pid.map(|pid| {
-        let output_pattern = record::chunk_output_pattern(Path::new(&session.chunks_dir));
-        record::SegmentedCaptureIdentity::new(pid, &output_pattern)
-    })
+    let streams = match mode {
+        meet::MeetSourceMode::MicOnly => vec![meet::MeetingSourceStream {
+            label: meet::MeetingSourceLabel::UserMic,
+            device: mic_device.to_string(),
+            chunks_dir: None,
+            recorder_stderr_path: None,
+            recorder_pid: None,
+            recorder_identity: None,
+        }],
+        meet::MeetSourceMode::SystemOnly => vec![meet::MeetingSourceStream {
+            label: meet::MeetingSourceLabel::SystemAudio,
+            device: system_device.unwrap(),
+            chunks_dir: None,
+            recorder_stderr_path: None,
+            recorder_pid: None,
+            recorder_identity: None,
+        }],
+        meet::MeetSourceMode::MicPlusSystem => vec![
+            meet::MeetingSourceStream {
+                label: meet::MeetingSourceLabel::UserMic,
+                device: mic_device.to_string(),
+                chunks_dir: None,
+                recorder_stderr_path: None,
+                recorder_pid: None,
+                recorder_identity: None,
+            },
+            meet::MeetingSourceStream {
+                label: meet::MeetingSourceLabel::SystemAudio,
+                device: system_device.unwrap(),
+                chunks_dir: None,
+                recorder_stderr_path: None,
+                recorder_pid: None,
+                recorder_identity: None,
+            },
+        ],
+    };
+
+    Ok(meet::MeetingSourceMetadata::new(mode, streams))
+}
+
+fn resolve_system_audio_device(
+    system_device: Option<String>,
+    ffmpeg: &Path,
+) -> Result<String, ComlinkError> {
+    if let Some(device) = system_device
+        .or_else(|| env::var("COMLINK_SYSTEM_AUDIO_DEVICE").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        if device.to_ascii_lowercase().contains("blackhole") {
+            return Ok(device.trim_start_matches(':').to_string());
+        }
+
+        return Err(ComlinkError::AudioCaptureFailed(format!(
+            "system-audio capture requires a BlackHole input device; got `{device}`. Install BlackHole 2ch or set COMLINK_SYSTEM_AUDIO_DEVICE to the exact BlackHole AVFoundation input name."
+        )));
+    }
+
+    let probe = system_audio::RealSystemAudioProbe::from_ffmpeg(ffmpeg.to_path_buf());
+    system_audio::resolve_capture_plan(&probe)
+        .map(|plan| plan.device_name)
+        .map_err(ComlinkError::AudioCaptureFailed)
+}
+
+fn same_audio_device(left: &str, right: &str) -> bool {
+    left.trim_start_matches(':')
+        .eq_ignore_ascii_case(right.trim_start_matches(':'))
+}
+
+fn start_session_recorders(
+    ffmpeg: &Path,
+    session: &meet::MeetingSessionState,
+    chunk_seconds: u64,
+) -> Result<Vec<(meet::MeetingSourceLabel, record::SegmentedCapture)>, ComlinkError> {
+    let mut captures: Vec<(meet::MeetingSourceLabel, record::SegmentedCapture)> =
+        Vec::with_capacity(session.source.streams.len());
+    for stream in &session.source.streams {
+        let chunks_dir = stream.chunks_dir.as_deref().ok_or_else(|| {
+            ComlinkError::AudioCaptureFailed("missing stream chunks_dir".to_string())
+        })?;
+        let stderr_path = stream.recorder_stderr_path.as_deref().ok_or_else(|| {
+            ComlinkError::AudioCaptureFailed("missing stream recorder stderr path".to_string())
+        })?;
+        let device = capture_device_for_stream(stream);
+        let capture = match record::start_segmented_capture(record::SegmentedCaptureOptions {
+            ffmpeg,
+            device: &device,
+            chunks_dir: Path::new(chunks_dir),
+            stderr_path: Path::new(stderr_path),
+            chunk_duration: Duration::from_secs(chunk_seconds),
+        }) {
+            Ok(capture) => capture,
+            Err(error) => {
+                for (_, capture) in &captures {
+                    let _ = record::stop_segmented_capture(
+                        &capture.identity,
+                        Duration::from_secs(DEFAULT_MEETING_STOP_TIMEOUT_SECONDS),
+                    );
+                }
+                return Err(error);
+            }
+        };
+        captures.push((stream.label, capture));
+    }
+    Ok(captures)
+}
+
+fn capture_device_for_stream(stream: &meet::MeetingSourceStream) -> String {
+    match stream.label {
+        meet::MeetingSourceLabel::SystemAudio => {
+            system_audio::avfoundation_audio_input(&stream.device)
+        }
+        meet::MeetingSourceLabel::Mixed
+            if stream.device.to_ascii_lowercase().contains("blackhole") =>
+        {
+            system_audio::avfoundation_audio_input(&stream.device)
+        }
+        _ => stream.device.clone(),
+    }
+}
+
+fn apply_started_recorders(
+    session: &mut meet::MeetingSessionState,
+    captures: Vec<(meet::MeetingSourceLabel, record::SegmentedCapture)>,
+) {
+    for (label, capture) in captures {
+        if session.recorder_pid.is_none() {
+            session.recorder_pid = Some(capture.pid);
+            session.recorder_identity = Some(capture.identity.clone());
+        }
+        if let Some(stream) = session
+            .source
+            .streams
+            .iter_mut()
+            .find(|stream| stream.label == label)
+        {
+            stream.recorder_pid = Some(capture.pid);
+            stream.recorder_identity = Some(capture.identity);
+        }
+    }
+}
+
+fn session_recorders_status(session: &meet::MeetingSessionState) -> Vec<MeetRecorderStatus> {
+    session
+        .source
+        .streams
+        .iter()
+        .filter_map(|stream| {
+            Some(MeetRecorderStatus {
+                source_label: stream.label,
+                device: stream.device.clone(),
+                pid: stream.recorder_pid?,
+                chunks_dir: stream
+                    .chunks_dir
+                    .clone()
+                    .unwrap_or_else(|| session.chunks_dir.clone()),
+                stderr_path: stream
+                    .recorder_stderr_path
+                    .clone()
+                    .unwrap_or_else(|| session.recorder_stderr_path.clone()),
+            })
+        })
+        .collect()
+}
+
+fn session_recorder_identities(
+    session: &meet::MeetingSessionState,
+) -> Vec<record::SegmentedCaptureIdentity> {
+    let identities = session
+        .source
+        .streams
+        .iter()
+        .filter_map(|stream| {
+            if let Some(identity) = &stream.recorder_identity {
+                return Some(identity.clone());
+            }
+            stream.recorder_pid.map(|pid| {
+                let chunks_dir = stream
+                    .chunks_dir
+                    .as_deref()
+                    .unwrap_or(session.chunks_dir.as_str());
+                let output_pattern = record::chunk_output_pattern(Path::new(chunks_dir));
+                record::SegmentedCaptureIdentity::new(pid, &output_pattern)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if !identities.is_empty() {
+        return identities;
+    }
+
+    session
+        .recorder_pid
+        .map(|pid| {
+            let output_pattern = record::chunk_output_pattern(Path::new(&session.chunks_dir));
+            record::SegmentedCaptureIdentity::new(pid, &output_pattern)
+        })
+        .into_iter()
+        .collect()
 }
 
 fn session_recorder_is_verified_running(session: &meet::MeetingSessionState) -> bool {
-    session_recorder_identity(session)
-        .as_ref()
-        .map(record::segmented_capture_is_running)
-        .unwrap_or(false)
+    let identities = session_recorder_identities(session);
+    !identities.is_empty() && identities.iter().any(record::segmented_capture_is_running)
 }
 
 fn reclaim_inactive_recording_session(
@@ -979,7 +1238,7 @@ fn reclaim_inactive_recording_session(
     let duration_ms = store
         .discover_chunks(session, |path| audio::probe_duration_ms(path, None))
         .ok()
-        .and_then(|chunks| chunks.last().map(meet::MeetingChunk::end_ms))
+        .map(|chunks| meeting_duration_ms(&chunks))
         .unwrap_or_default();
     session.mark_stopped(meet::now_ms(), duration_ms, 0);
     store.save_session(session)?;
@@ -990,10 +1249,45 @@ fn stop_session_recorder(
     session: &meet::MeetingSessionState,
     timeout: Duration,
 ) -> Result<bool, ComlinkError> {
-    let Some(identity) = session_recorder_identity(session) else {
+    let identities = session_recorder_identities(session);
+    if identities.is_empty() {
         return Ok(false);
+    }
+    let mut stopped_any = false;
+    for identity in identities {
+        stopped_any |= record::stop_segmented_capture(&identity, timeout)?;
+    }
+    Ok(stopped_any)
+}
+
+fn recorder_stderr_paths(session: &meet::MeetingSessionState) -> Vec<String> {
+    let mut paths = Vec::new();
+    for stream in &session.source.streams {
+        if let Some(path) = &stream.recorder_stderr_path {
+            if !paths.contains(path) {
+                paths.push(path.clone());
+            }
+        }
+    }
+
+    if paths.is_empty() && !session.recorder_stderr_path.is_empty() {
+        paths.push(session.recorder_stderr_path.clone());
+    }
+
+    paths
+}
+
+fn no_meeting_chunks_error(session: &meet::MeetingSessionState) -> ComlinkError {
+    let paths = recorder_stderr_paths(session);
+    let stderr_hint = match paths.as_slice() {
+        [] => "no recorder stderr log was recorded".to_string(),
+        [path] => format!("see recorder stderr log: {path}"),
+        _ => format!("see recorder stderr logs: {}", paths.join(", ")),
     };
-    record::stop_segmented_capture(&identity, timeout)
+
+    ComlinkError::AudioCaptureFailed(format!(
+        "meeting recording produced no chunk files; {stderr_hint}"
+    ))
 }
 
 struct MeetStopOptions {
@@ -1028,19 +1322,13 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
 
     let preliminary_chunks =
         store.discover_chunks(&session, |path| audio::probe_duration_ms(path, None))?;
-    let preliminary_duration_ms = preliminary_chunks
-        .last()
-        .map(meet::MeetingChunk::end_ms)
-        .unwrap_or_default();
+    let preliminary_duration_ms = meeting_duration_ms(&preliminary_chunks);
     session.mark_stopped(stopped_at_ms, preliminary_duration_ms, 0);
     store.save_session(&session)?;
     store.clear_active_if_matches(&session.session_id)?;
 
     if preliminary_chunks.is_empty() {
-        return Err(ComlinkError::AudioCaptureFailed(format!(
-            "meeting recording produced no chunk files; see {}",
-            session.recorder_stderr_path
-        )));
+        return Err(no_meeting_chunks_error(&session));
     }
 
     let runtime = deps::runtime_from_model_path(PathBuf::from(&session.model_path))?;
@@ -1048,10 +1336,7 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
         audio::probe_duration_ms(path, runtime.ffprobe.as_deref())
     })?;
     if chunks.is_empty() {
-        return Err(ComlinkError::AudioCaptureFailed(format!(
-            "meeting recording produced no chunk files; see {}",
-            session.recorder_stderr_path
-        )));
+        return Err(no_meeting_chunks_error(&session));
     }
 
     let engine = WhisperCppEngine {
@@ -1073,6 +1358,8 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
         chunk_transcripts.push(meet::ChunkTranscript {
             chunk_index: chunk.index,
             chunk_path: chunk.path.clone(),
+            source_label: chunk.source_label,
+            source_device: chunk.source_device.clone(),
             chunk_start_ms: chunk.start_ms,
             chunk_duration_ms: chunk.duration_ms,
             transcript,
@@ -1083,10 +1370,7 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
     let raw_text = meet::raw_text_from_segments(&segment_result.segments);
     let processed =
         output::process_text(&raw_text, &session.mode, &resolved.config, session.no_llm)?;
-    let duration_ms = chunks
-        .last()
-        .map(meet::MeetingChunk::end_ms)
-        .unwrap_or_default();
+    let duration_ms = meeting_duration_ms(&chunks);
     session.mark_stopped(stopped_at_ms, duration_ms, segment_result.segments.len());
     let export = meet::build_export(
         &session,
@@ -1112,6 +1396,7 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
             duration_ms,
             chunks_processed: chunks.len(),
             segment_count: export.session.segment_count,
+            source: export.source.clone(),
             retention: export.retention,
             segmenting: export.segmenting,
             artifacts: export.artifacts,
@@ -1119,6 +1404,14 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
         },
         format,
     )
+}
+
+fn meeting_duration_ms(chunks: &[meet::MeetingChunk]) -> u64 {
+    chunks
+        .iter()
+        .map(meet::MeetingChunk::end_ms)
+        .max()
+        .unwrap_or_default()
 }
 
 fn meet_export(id: Option<String>, format: MeetExportFormat) -> Result<(), ComlinkError> {
@@ -1370,6 +1663,18 @@ struct PrivacyAudit {
     selected_model_exists: bool,
     asr: String,
     llm: String,
+    system_audio: PrivacySystemAudio,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PrivacySystemAudio {
+    strategy: String,
+    available: bool,
+    status: String,
+    device_name: Option<String>,
+    microphone_permission: String,
+    routing_permission: String,
+    raw_audio_retained: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1379,6 +1684,8 @@ struct MeetStartStatus<'a> {
     status: &'a str,
     elapsed_ms: u64,
     recorder_pid: u32,
+    recorders: Vec<MeetRecorderStatus>,
+    source: meet::MeetingSourceMetadata,
     session_dir: String,
     chunks_dir: String,
     segments_jsonl: String,
@@ -1386,6 +1693,15 @@ struct MeetStartStatus<'a> {
     markdown_export: String,
     consent_reminder: &'a str,
     inactivity_auto_stop: meet::InactivityAutoStop,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MeetRecorderStatus {
+    source_label: meet::MeetingSourceLabel,
+    device: String,
+    pid: u32,
+    chunks_dir: String,
+    stderr_path: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1397,6 +1713,7 @@ struct MeetStopStatus<'a> {
     duration_ms: u64,
     chunks_processed: usize,
     segment_count: usize,
+    source: meet::MeetingSourceMetadata,
     retention: meet::MeetingRetentionPolicy,
     segmenting: meet::MeetingSegmenting,
     artifacts: meet::MeetingArtifacts,
@@ -1511,6 +1828,26 @@ fn print_privacy_audit(audit: &PrivacyAudit, format: ConfigFormat) -> Result<(),
             println!("selected_model_exists: {}", audit.selected_model_exists);
             println!("asr: {}", audit.asr);
             println!("llm: {}", audit.llm);
+            println!(
+                "system_audio: strategy={} available={} status={} device={} raw_audio_retained={}",
+                audit.system_audio.strategy,
+                audit.system_audio.available,
+                audit.system_audio.status,
+                audit
+                    .system_audio
+                    .device_name
+                    .as_deref()
+                    .unwrap_or("<none>"),
+                audit.system_audio.raw_audio_retained
+            );
+            println!(
+                "system_audio_microphone_permission: {}",
+                audit.system_audio.microphone_permission
+            );
+            println!(
+                "system_audio_routing_permission: {}",
+                audit.system_audio.routing_permission
+            );
         }
     }
     Ok(())
@@ -1527,6 +1864,17 @@ fn print_meet_start(
             println!("status: {}", status.status);
             println!("elapsed_ms: {}", status.elapsed_ms);
             println!("recorder_pid: {}", status.recorder_pid);
+            println!("source_mode: {}", status.source.mode.as_str());
+            for recorder in &status.recorders {
+                println!(
+                    "recorder: source={} pid={} device={} chunks_dir={} stderr={}",
+                    recorder.source_label.as_str(),
+                    recorder.pid,
+                    recorder.device,
+                    recorder.chunks_dir,
+                    recorder.stderr_path
+                );
+            }
             println!("session_dir: {}", status.session_dir);
             println!("chunks_dir: {}", status.chunks_dir);
             println!("segments_jsonl: {}", status.segments_jsonl);
@@ -1552,6 +1900,10 @@ fn print_meet_stop(status: &MeetStopStatus<'_>, format: ConfigFormat) -> Result<
             println!("duration_ms: {}", status.duration_ms);
             println!("chunks_processed: {}", status.chunks_processed);
             println!("segment_count: {}", status.segment_count);
+            println!("source_mode: {}", status.source.mode.as_str());
+            for stream in &status.source.streams {
+                println!("source_stream: {} {}", stream.label.as_str(), stream.device);
+            }
             println!("segments_jsonl: {}", status.artifacts.segments_jsonl);
             println!("json_export: {}", status.artifacts.json_export);
             println!("markdown_export: {}", status.artifacts.markdown_export);

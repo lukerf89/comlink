@@ -1,0 +1,23 @@
+{
+  "history_enabled": true,
+  "retention": {
+    "metadata": true,
+    "transcripts": true,
+    "audio": false
+  },
+  "config_file": "<tmp>/comlink-home/config.json",
+  "database_file": "<tmp>/comlink-data/history.sqlite3",
+  "selected_model": "<tmp>/mock-model.bin",
+  "selected_model_exists": true,
+  "asr": "local whisper.cpp",
+  "llm": "disabled; local LLM rewrite is opt-in",
+  "system_audio": {
+    "strategy": "blackhole-virtual-audio-device",
+    "available": true,
+    "status": "ok",
+    "device_name": "BlackHole 2ch",
+    "microphone_permission": "Mic capture uses FFmpeg AVFoundation and requires the terminal or parent app to have macOS Microphone permission.",
+    "routing_permission": "BlackHole is visible as a local audio input; Comlink still depends on the user routing Teams/Zoom output into BlackHole.",
+    "raw_audio_retained": false
+  }
+}

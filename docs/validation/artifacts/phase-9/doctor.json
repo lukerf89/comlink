@@ -1,0 +1,137 @@
+{
+  "schema_version": "comlink.doctor.v1",
+  "ok": true,
+  "checks": [
+    {
+      "name": "ffmpeg",
+      "status": "ok",
+      "required": true,
+      "path": "<tmp>/mock-ffmpeg",
+      "detail": "FFmpeg normalizes files and records microphone audio.",
+      "remediation": "set COMLINK_FFMPEG or install ffmpeg"
+    },
+    {
+      "name": "ffprobe",
+      "status": "ok",
+      "required": false,
+      "path": "<tmp>/mock-ffprobe",
+      "detail": "FFprobe improves duration and audio metadata detection.",
+      "remediation": "optional but recommended; set COMLINK_FFPROBE or install ffprobe"
+    },
+    {
+      "name": "asr",
+      "status": "ok",
+      "required": true,
+      "path": "<tmp>/mock-whisper",
+      "detail": "Local ASR uses whisper.cpp through whisper-cli.",
+      "remediation": "set COMLINK_WHISPER_CPP to whisper-cli or install whisper.cpp"
+    },
+    {
+      "name": "model-path",
+      "status": "ok",
+      "required": true,
+      "path": "<tmp>/mock-model.bin",
+      "detail": "Selected whisper.cpp ggml model file.",
+      "remediation": "set COMLINK_WHISPER_MODEL or run comlink models select <name> --path <file>"
+    },
+    {
+      "name": "clipboard-copy",
+      "status": "ok",
+      "required": true,
+      "path": "/usr/bin/pbcopy",
+      "detail": "Clipboard delivery uses pbcopy or COMLINK_PBCOPY.",
+      "remediation": "install macOS pbcopy support or set COMLINK_PBCOPY to an executable test adapter"
+    },
+    {
+      "name": "clipboard-read",
+      "status": "ok",
+      "required": false,
+      "path": "/usr/bin/pbpaste",
+      "detail": "Clipboard restore uses pbpaste or COMLINK_PBPASTE.",
+      "remediation": "optional; install macOS pbpaste support or set COMLINK_PBPASTE"
+    },
+    {
+      "name": "data-path",
+      "status": "ok",
+      "required": true,
+      "path": "<tmp>/comlink-data",
+      "detail": "Data directory is present or can be created.",
+      "remediation": "set COMLINK_DATA_DIR to a writable directory"
+    },
+    {
+      "name": "system-audio",
+      "status": "ok",
+      "required": false,
+      "path": "BlackHole 2ch",
+      "detail": "BlackHole virtual audio input is visible to AVFoundation.",
+      "remediation": "Route meeting output through a Multi-Output or Aggregate Device that includes BlackHole, then capture the BlackHole input alongside the microphone in a future phase."
+    },
+    {
+      "name": "microphone",
+      "status": "info",
+      "required": false,
+      "detail": "record uses FFmpeg AVFoundation input device :0",
+      "remediation": "grant Terminal microphone permission in macOS Privacy & Security; override with COMLINK_RECORD_DEVICE or record --device"
+    }
+  ],
+  "paths": {
+    "home_dir": "<tmp>/comlink-home",
+    "config_file": "<tmp>/comlink-home/config.json",
+    "data_dir": "<tmp>/comlink-data",
+    "database_file": "<tmp>/comlink-data/history.sqlite3",
+    "audio_dir": "<tmp>/comlink-data/audio"
+  },
+  "privacy": {
+    "history_enabled": true,
+    "retain_metadata": true,
+    "retain_transcripts": true,
+    "retain_audio": false,
+    "local_llm": "disabled",
+    "posture": "local-first; ASR runs through local whisper.cpp; LLM rewrite is opt-in"
+  },
+  "system_audio": {
+    "available": true,
+    "status": "ok",
+    "strategy": "blackhole-virtual-audio-device",
+    "detail": "BlackHole virtual audio input is visible to AVFoundation.",
+    "remediation": "Route meeting output through a Multi-Output or Aggregate Device that includes BlackHole, then capture the BlackHole input alongside the microphone in a future phase.",
+    "macos_version": "26.5.1",
+    "dependency": {
+      "name": "BlackHole virtual audio device",
+      "present": true,
+      "device_name": "BlackHole 2ch",
+      "detail": "Chosen Phase 8 dependency for local Zoom/Teams system audio routing."
+    },
+    "permissions": {
+      "microphone": {
+        "status": "manual-check",
+        "detail": "Mic capture uses FFmpeg AVFoundation and requires the terminal or parent app to have macOS Microphone permission.",
+        "remediation": "Grant Microphone permission in macOS Privacy & Security to the terminal or app launching Comlink; rerun `comlink meet start --source mic-only` as a smoke test."
+      },
+      "system_audio_routing": {
+        "status": "device-visible",
+        "detail": "BlackHole is visible as a local audio input; Comlink still depends on the user routing Teams/Zoom output into BlackHole.",
+        "remediation": "Install BlackHole 2ch, include it in a Multi-Output or Aggregate Device with your speakers/headphones, then select that output in macOS or the meeting app."
+      }
+    },
+    "native_core_audio_tap": {
+      "supported_by_os": true,
+      "minimum_macos": "14.4.0",
+      "permission_model": "Requires macOS system audio recording consent; doctor does not request or bypass TCC.",
+      "detail": "Native Core Audio process taps are a future no-driver option, but are not the Phase 8 recommendation."
+    },
+    "source_metadata": {
+      "labels": [
+        "user_mic",
+        "system_audio",
+        "mixed"
+      ],
+      "modes": [
+        "mic-only",
+        "system-only",
+        "mic-plus-system"
+      ],
+      "mixed_source_label": "mixed"
+    }
+  }
+}
