@@ -158,7 +158,7 @@ artifact_dir = pathlib.Path(sys.argv[1])
 clean = json.load(open(artifact_dir / "mode-clean.json"))
 if clean["raw_text"] != "um please send this to super base . my signature":
     raise SystemExit("mode apply should preserve raw_text")
-if clean["final_text"] != "please send this to Supabase. Best, Luke":
+if clean["final_text"] != "please send this to Supabase. Best,\nLuke":
     raise SystemExit(f"unexpected clean text: {clean['final_text']!r}")
 
 raw = json.load(open(artifact_dir / "mode-raw.json"))
@@ -166,7 +166,7 @@ if raw["final_text"] != raw["raw_text"]:
     raise SystemExit("raw mode should not apply deterministic rewrites")
 
 memo = json.load(open(artifact_dir / "mode-memo.json"))
-if memo["final_text"] != "please send this to Supabase. Best, Luke.":
+if memo["final_text"] != "please send this to Supabase. Best,\nLuke.":
     raise SystemExit(f"unexpected memo text: {memo['final_text']!r}")
 
 email = json.load(open(artifact_dir / "mode-email-reply.json"))
