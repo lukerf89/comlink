@@ -1,0 +1,40 @@
+{
+  "schema_version": "comlink.session.v1",
+  "session_id": "s1784564378347770000-67077-0",
+  "text": "testing comlink transcription. The quick brown fox jumps over the lazy dog.",
+  "raw_text": "testing comlink transcription. The quick brown fox jumps over the lazy dog.",
+  "final_text": "testing comlink transcription. The quick brown fox jumps over the lazy dog.",
+  "mode": "clean",
+  "copied": false,
+  "engine": "whisper.cpp",
+  "model": "<model>",
+  "duration_ms": 4474,
+  "segments": [
+    {
+      "start_ms": 0,
+      "end_ms": 4474,
+      "text": "testing comlink transcription. The quick brown fox jumps over the lazy dog."
+    }
+  ],
+  "source": {
+    "path": "<tmp>/fixture.wav",
+    "normalized_sample_rate_hz": 16000,
+    "normalized_channels": 1
+  },
+  "context": {
+    "policy": "none",
+    "items": []
+  },
+  "processing_steps": [
+    {
+      "name": "deterministic-cleanup"
+    },
+    {
+      "name": "vocabulary"
+    },
+    {
+      "name": "snippets"
+    }
+  ],
+  "warnings": []
+}
