@@ -1388,6 +1388,12 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
     let processed =
         output::process_text(&raw_text, &session.mode, &resolved.config, session.no_llm)?;
     let duration_ms = meeting_duration_ms(&chunks);
+
+    // Measure captured audio level from the chunk WAVs (still on disk here,
+    // before any retention cleanup) so we can warn on near-silent input that
+    // whisper.cpp otherwise turns into a hallucinated filler transcript.
+    let audio_level = meeting_audio_level(&chunks);
+
     session.mark_stopped(stopped_at_ms, duration_ms, segment_result.segments.len());
     let export = meet::build_export(
         &session,
@@ -1395,6 +1401,7 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
         &raw_text,
         &processed,
         segment_result.segmenting,
+        audio_level,
     );
 
     store.save_session(&session)?;
@@ -1417,10 +1424,28 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
             retention: export.retention,
             segmenting: export.segmenting,
             artifacts: export.artifacts,
+            audio_level: export.audio_level,
+            warnings: export.warnings,
             inactivity_auto_stop: session.inactivity_auto_stop,
         },
         format,
     )
+}
+
+/// Combine the per-chunk WAV level measurements into a single session-level
+/// audio level, returning `None` when nothing measurable was captured (e.g. the
+/// chunk files are not 16-bit PCM). Measurement is best-effort: chunks that fail
+/// to read are simply skipped rather than failing the stop.
+fn meeting_audio_level(chunks: &[meet::MeetingChunk]) -> Option<meet::MeetingAudioLevel> {
+    let measurements = chunks
+        .iter()
+        .filter_map(|chunk| audio::read_wav_level_samples(&chunk.path));
+    let level = audio::session_audio_level(measurements)?;
+    Some(meet::MeetingAudioLevel {
+        mean_dbfs: level.mean_dbfs,
+        peak_dbfs: level.peak_dbfs,
+        near_silent: level.is_near_silent(),
+    })
 }
 
 fn meeting_duration_ms(chunks: &[meet::MeetingChunk]) -> u64 {
@@ -1734,6 +1759,9 @@ struct MeetStopStatus<'a> {
     retention: meet::MeetingRetentionPolicy,
     segmenting: meet::MeetingSegmenting,
     artifacts: meet::MeetingArtifacts,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    audio_level: Option<meet::MeetingAudioLevel>,
+    warnings: Vec<String>,
     inactivity_auto_stop: meet::InactivityAutoStop,
 }
 
@@ -1932,10 +1960,19 @@ fn print_meet_stop(status: &MeetStopStatus<'_>, format: ConfigFormat) -> Result<
                 "segmenting: {} vad_available={}",
                 status.segmenting.strategy, status.segmenting.vad_available
             );
+            if let Some(level) = &status.audio_level {
+                println!(
+                    "audio_level: mean={:.1} dBFS, peak={:.1} dBFS, near_silent={}",
+                    level.mean_dbfs, level.peak_dbfs, level.near_silent
+                );
+            }
             println!(
                 "inactivity_auto_stop: enabled={} ({})",
                 status.inactivity_auto_stop.enabled, status.inactivity_auto_stop.reason
             );
+            for warning in &status.warnings {
+                println!("warning: {warning}");
+            }
         }
     }
     Ok(())
