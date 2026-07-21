@@ -143,7 +143,7 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_MIN_RECORDING_MS)]
         min_duration_ms: u64,
 
-        /// FFmpeg AVFoundation input device. Defaults to COMLINK_RECORD_DEVICE or :0.
+        /// FFmpeg AVFoundation input device, by name (e.g. "MacBook Pro Microphone") or index (:2). Defaults to COMLINK_RECORD_DEVICE or :0.
         #[arg(long)]
         device: Option<String>,
 
@@ -373,7 +373,7 @@ enum MeetCommand {
         #[arg(long)]
         model: Option<PathBuf>,
 
-        /// FFmpeg AVFoundation input device. Defaults to COMLINK_RECORD_DEVICE or :0.
+        /// FFmpeg AVFoundation input device, by name (e.g. "MacBook Pro Microphone") or index (:2). Defaults to COMLINK_RECORD_DEVICE or :0.
         #[arg(long)]
         device: Option<String>,
 
@@ -381,7 +381,7 @@ enum MeetCommand {
         #[arg(long, value_parser = ["mic-only", "system-only", "mic-plus-system"], default_value = "mic-only")]
         source: String,
 
-        /// BlackHole FFmpeg AVFoundation audio input. Defaults to COMLINK_SYSTEM_AUDIO_DEVICE or detected BlackHole.
+        /// BlackHole FFmpeg AVFoundation audio input, by name (e.g. "BlackHole 2ch") or index (:2). Defaults to COMLINK_SYSTEM_AUDIO_DEVICE or detected BlackHole.
         #[arg(long)]
         system_device: Option<String>,
 
@@ -548,6 +548,7 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
     let device = device
         .or_else(|| env::var("COMLINK_RECORD_DEVICE").ok())
         .unwrap_or_else(|| DEFAULT_RECORD_DEVICE.to_string());
+    let device = resolve_mic_device(&device, &runtime.ffmpeg)?;
 
     eprintln!("Recording... press Enter to stop.");
     let captured = record::record_until_enter(record::RecordingOptions {
@@ -911,6 +912,7 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
     let device = device
         .or_else(|| env::var("COMLINK_RECORD_DEVICE").ok())
         .unwrap_or_else(|| DEFAULT_RECORD_DEVICE.to_string());
+    let device = resolve_mic_device(&device, &runtime.ffmpeg)?;
     let source_mode =
         meet::MeetSourceMode::parse(source).ok_or_else(|| ComlinkError::InvalidConfigValue {
             name: "meet start --source",
@@ -1065,22 +1067,37 @@ fn build_meeting_source_metadata(
     Ok(meet::MeetingSourceMetadata::new(mode, streams))
 }
 
+fn resolve_mic_device(device: &str, ffmpeg: &Path) -> Result<String, ComlinkError> {
+    system_audio::resolve_capture_device(device, ffmpeg)
+        .map(|resolved| resolved.avfoundation_input)
+        .map_err(ComlinkError::AudioCaptureFailed)
+}
+
 fn resolve_system_audio_device(
     system_device: Option<String>,
     ffmpeg: &Path,
 ) -> Result<String, ComlinkError> {
-    if let Some(device) = system_device
+    if let Some(requested) = system_device
         .or_else(|| env::var("COMLINK_SYSTEM_AUDIO_DEVICE").ok())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
     {
-        if device.to_ascii_lowercase().contains("blackhole") {
-            return Ok(device.trim_start_matches(':').to_string());
+        // Enumerate so a numeric index (`:2`) can be mapped back to its device
+        // name for the BlackHole guard, alongside name-based selection.
+        let devices = system_audio::list_avfoundation_audio_devices(ffmpeg)
+            .map_err(ComlinkError::AudioCaptureFailed)?;
+        let resolved = system_audio::resolve_avfoundation_audio_device(&requested, &devices)
+            .map_err(|error| ComlinkError::AudioCaptureFailed(error.to_string()))?;
+        // The resolved name is only known when we matched an enumerated device;
+        // fall back to the raw request so the guard message stays informative.
+        let device_name = resolved.name.as_deref().unwrap_or(requested.as_str());
+        if !device_name.to_ascii_lowercase().contains("blackhole") {
+            return Err(ComlinkError::AudioCaptureFailed(format!(
+                "system-audio capture requires a BlackHole input device; got `{device_name}`. Install BlackHole 2ch or set COMLINK_SYSTEM_AUDIO_DEVICE to the exact BlackHole AVFoundation input name."
+            )));
         }
 
-        return Err(ComlinkError::AudioCaptureFailed(format!(
-            "system-audio capture requires a BlackHole input device; got `{device}`. Install BlackHole 2ch or set COMLINK_SYSTEM_AUDIO_DEVICE to the exact BlackHole AVFoundation input name."
-        )));
+        return Ok(resolved.avfoundation_input);
     }
 
     let probe = system_audio::RealSystemAudioProbe::from_ffmpeg(ffmpeg.to_path_buf());

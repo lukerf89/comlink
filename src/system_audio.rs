@@ -182,6 +182,184 @@ pub fn avfoundation_audio_input(device_name: &str) -> String {
     }
 }
 
+/// A capture-device selector resolved against the enumerated AVFoundation audio
+/// device list. `avfoundation_input` is the value to pass to ffmpeg's `-i`
+/// argument (an audio index such as `:2`). `name` is the canonical device name
+/// when the selector matched a device by name; it is `None` for a numeric-index
+/// passthrough that was not (or could not be) mapped back to an enumerated name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceMatch {
+    pub avfoundation_input: String,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeviceResolutionError {
+    NotFound {
+        requested: String,
+        available: Vec<String>,
+    },
+    Ambiguous {
+        requested: String,
+        matches: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for DeviceResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound {
+                requested,
+                available,
+            } => write!(
+                formatter,
+                "no AVFoundation audio device matched `{requested}`. Available devices: {}",
+                format_device_list(available)
+            ),
+            Self::Ambiguous { requested, matches } => write!(
+                formatter,
+                "device name `{requested}` is ambiguous; it matches multiple AVFoundation audio devices: {}",
+                format_device_list(matches)
+            ),
+        }
+    }
+}
+
+impl std::error::Error for DeviceResolutionError {}
+
+fn format_device_list(devices: &[String]) -> String {
+    if devices.is_empty() {
+        return "<none detected>".to_string();
+    }
+    devices
+        .iter()
+        .enumerate()
+        .map(|(index, name)| format!("[{index}] {name}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Interpret a selector as a numeric AVFoundation index specifier. Accepts a
+/// bare index (`2`), a colon-prefixed index (`:2`), and a `video:audio`
+/// specifier (`0:1`), normalizing a bare number to `:N`. Returns `None` when the
+/// selector should be treated as a device name.
+fn numeric_index_input(requested: &str) -> Option<String> {
+    let trimmed = requested.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let has_colon = trimmed.contains(':');
+    let digits: String = trimmed.chars().filter(|ch| *ch != ':').collect();
+    if digits.is_empty() {
+        // A lone `:` (or colons) means "AVFoundation default"; pass it through.
+        return has_colon.then(|| trimmed.to_string());
+    }
+    if digits.chars().all(|ch| ch.is_ascii_digit()) {
+        if has_colon {
+            Some(trimmed.to_string())
+        } else {
+            Some(format!(":{trimmed}"))
+        }
+    } else {
+        None
+    }
+}
+
+/// Resolve a user-supplied capture-device selector against an enumerated list of
+/// AVFoundation audio device names. Numeric indices (`:2`, `2`) pass through for
+/// back-compat; names are matched case-insensitively (exact match preferred,
+/// then an unambiguous substring match) and resolved to their current index.
+pub fn resolve_avfoundation_audio_device(
+    requested: &str,
+    devices: &[String],
+) -> Result<DeviceMatch, DeviceResolutionError> {
+    if let Some(input) = numeric_index_input(requested) {
+        // When a bare/colon index maps onto an enumerated device, surface the
+        // canonical name so callers (e.g. the BlackHole guard) can inspect it.
+        let name = index_from_input(&input).and_then(|index| devices.get(index).cloned());
+        return Ok(DeviceMatch {
+            avfoundation_input: input,
+            name,
+        });
+    }
+
+    let needle = requested.trim();
+    let exact: Vec<usize> = devices
+        .iter()
+        .enumerate()
+        .filter(|(_, device)| device.trim().eq_ignore_ascii_case(needle))
+        .map(|(index, _)| index)
+        .collect();
+    if let Some(index) = single_match(&exact) {
+        return Ok(name_match(index, devices));
+    }
+    if exact.len() > 1 {
+        return Err(DeviceResolutionError::Ambiguous {
+            requested: needle.to_string(),
+            matches: exact.iter().map(|index| devices[*index].clone()).collect(),
+        });
+    }
+
+    let lowered = needle.to_ascii_lowercase();
+    let substring: Vec<usize> = devices
+        .iter()
+        .enumerate()
+        .filter(|(_, device)| device.to_ascii_lowercase().contains(&lowered))
+        .map(|(index, _)| index)
+        .collect();
+    match single_match(&substring) {
+        Some(index) => Ok(name_match(index, devices)),
+        None if substring.is_empty() => Err(DeviceResolutionError::NotFound {
+            requested: needle.to_string(),
+            available: devices.to_vec(),
+        }),
+        None => Err(DeviceResolutionError::Ambiguous {
+            requested: needle.to_string(),
+            matches: substring
+                .iter()
+                .map(|index| devices[*index].clone())
+                .collect(),
+        }),
+    }
+}
+
+fn single_match(indices: &[usize]) -> Option<usize> {
+    match indices {
+        [only] => Some(*only),
+        _ => None,
+    }
+}
+
+fn name_match(index: usize, devices: &[String]) -> DeviceMatch {
+    DeviceMatch {
+        avfoundation_input: format!(":{index}"),
+        name: Some(devices[index].clone()),
+    }
+}
+
+fn index_from_input(input: &str) -> Option<usize> {
+    // Only a plain `:N` or `N` maps to an enumerated index; a `video:audio`
+    // specifier is left unmapped.
+    let core = input.strip_prefix(':').unwrap_or(input);
+    if core.is_empty() || core.contains(':') {
+        return None;
+    }
+    core.parse().ok()
+}
+
+/// Enumerate AVFoundation audio devices with `ffmpeg` and resolve `requested`
+/// against them. Numeric-index selectors resolve without probing hardware.
+pub fn resolve_capture_device(requested: &str, ffmpeg: &Path) -> Result<DeviceMatch, String> {
+    if let Some(input) = numeric_index_input(requested) {
+        return Ok(DeviceMatch {
+            avfoundation_input: input,
+            name: None,
+        });
+    }
+    let devices = list_avfoundation_audio_devices(ffmpeg)?;
+    resolve_avfoundation_audio_device(requested, &devices).map_err(|error| error.to_string())
+}
+
 fn report_from_snapshot(
     snapshot: SystemAudioProbeSnapshot,
     preferred_device: Option<String>,
@@ -330,7 +508,7 @@ fn read_macos_version() -> Option<MacOsVersion> {
     MacOsVersion::parse(stdout.trim())
 }
 
-fn list_avfoundation_audio_devices(ffmpeg: &Path) -> Result<Vec<String>, String> {
+pub fn list_avfoundation_audio_devices(ffmpeg: &Path) -> Result<Vec<String>, String> {
     let output = Command::new(ffmpeg)
         .args([
             "-hide_banner",
@@ -623,5 +801,94 @@ mod tests {
             MacOsVersion::new(14, 4, 0)
         );
         assert!(MacOsVersion::parse("not-a-version").is_none());
+    }
+
+    fn sample_devices() -> Vec<String> {
+        vec![
+            "BlackHole 2ch".to_string(),
+            "MacBook Pro Microphone".to_string(),
+            "External USB Microphone".to_string(),
+        ]
+    }
+
+    #[test]
+    fn resolves_numeric_index_without_a_device_list() {
+        let resolved = resolve_avfoundation_audio_device(":2", &[]).unwrap();
+        assert_eq!(resolved.avfoundation_input, ":2");
+        assert_eq!(resolved.name, None);
+    }
+
+    #[test]
+    fn normalizes_bare_numeric_index_to_colon_form() {
+        let resolved = resolve_avfoundation_audio_device("2", &sample_devices()).unwrap();
+        assert_eq!(resolved.avfoundation_input, ":2");
+        // A numeric index that maps onto an enumerated device surfaces its name.
+        assert_eq!(resolved.name.as_deref(), Some("External USB Microphone"));
+    }
+
+    #[test]
+    fn resolves_exact_name_to_current_index() {
+        let resolved =
+            resolve_avfoundation_audio_device("MacBook Pro Microphone", &sample_devices()).unwrap();
+        assert_eq!(resolved.avfoundation_input, ":1");
+        assert_eq!(resolved.name.as_deref(), Some("MacBook Pro Microphone"));
+    }
+
+    #[test]
+    fn resolves_name_case_insensitively_and_trims() {
+        let resolved =
+            resolve_avfoundation_audio_device("  macbook pro microphone  ", &sample_devices())
+                .unwrap();
+        assert_eq!(resolved.avfoundation_input, ":1");
+    }
+
+    #[test]
+    fn resolves_unambiguous_substring_match() {
+        let resolved = resolve_avfoundation_audio_device("blackhole", &sample_devices()).unwrap();
+        assert_eq!(resolved.avfoundation_input, ":0");
+        assert_eq!(resolved.name.as_deref(), Some("BlackHole 2ch"));
+    }
+
+    #[test]
+    fn errors_and_lists_devices_when_name_not_found() {
+        let error =
+            resolve_avfoundation_audio_device("Nonexistent Device", &sample_devices()).unwrap_err();
+        match &error {
+            DeviceResolutionError::NotFound {
+                requested,
+                available,
+            } => {
+                assert_eq!(requested, "Nonexistent Device");
+                assert_eq!(available, &sample_devices());
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        let message = error.to_string();
+        assert!(message.contains("no AVFoundation audio device matched"));
+        assert!(message.contains("BlackHole 2ch"));
+        assert!(message.contains("MacBook Pro Microphone"));
+    }
+
+    #[test]
+    fn errors_and_lists_matches_when_substring_is_ambiguous() {
+        let error = resolve_avfoundation_audio_device("microphone", &sample_devices()).unwrap_err();
+        match &error {
+            DeviceResolutionError::Ambiguous { requested, matches } => {
+                assert_eq!(requested, "microphone");
+                assert_eq!(matches.len(), 2);
+                assert!(matches.contains(&"MacBook Pro Microphone".to_string()));
+                assert!(matches.contains(&"External USB Microphone".to_string()));
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+        assert!(error.to_string().contains("ambiguous"));
+    }
+
+    #[test]
+    fn prefers_exact_match_over_substring_matches() {
+        let devices = vec!["Microphone".to_string(), "External Microphone".to_string()];
+        let resolved = resolve_avfoundation_audio_device("Microphone", &devices).unwrap();
+        assert_eq!(resolved.avfoundation_input, ":0");
+        assert_eq!(resolved.name.as_deref(), Some("Microphone"));
     }
 }
