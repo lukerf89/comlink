@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{Read, Seek, SeekFrom},
+    io::{BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
 };
@@ -139,7 +139,9 @@ pub fn near_silent_warning_message(mean_dbfs: f64) -> String {
 /// hard failure). Channel count is ignored — every sample contributes to the
 /// level regardless of interleaving.
 pub fn read_wav_level_samples(path: &Path) -> Option<WavLevelSamples> {
-    let mut file = File::open(path).ok()?;
+    // Buffered so the sample-by-sample reads below don't become one syscall per
+    // 16-bit sample (millions per chunk) on the `meet stop` latency path.
+    let mut file = BufReader::new(File::open(path).ok()?);
     let mut header = [0_u8; 12];
     file.read_exact(&mut header).ok()?;
     if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
