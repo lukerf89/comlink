@@ -479,6 +479,13 @@ pub struct MeetingArtifacts {
     pub chunks_dir: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MeetingAudioLevel {
+    pub mean_dbfs: f64,
+    pub peak_dbfs: f64,
+    pub near_silent: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeetingExportSession {
     pub session_id: String,
@@ -519,6 +526,8 @@ pub struct MeetingExport {
     pub retention: MeetingRetentionPolicy,
     pub segmenting: MeetingSegmenting,
     pub artifacts: MeetingArtifacts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio_level: Option<MeetingAudioLevel>,
     pub raw_text: Option<String>,
     pub final_text: Option<String>,
     pub processing_steps: Vec<String>,
@@ -532,6 +541,7 @@ pub fn build_export(
     raw_text: &str,
     processed: &TextProcessingResult,
     segmenting: MeetingSegmenting,
+    audio_level: Option<MeetingAudioLevel>,
 ) -> MeetingExport {
     let retention = session.retention.clone();
     let artifacts = MeetingArtifacts {
@@ -554,6 +564,11 @@ pub fn build_export(
     };
 
     let mut warnings = processed.warnings.clone();
+    if let Some(level) = &audio_level {
+        if level.near_silent {
+            warnings.push(crate::audio::near_silent_warning_message(level.mean_dbfs));
+        }
+    }
     warnings.extend(transcript_quality_warnings(session, segments));
     let (final_text, final_collapsed) = collapse_repetition_loops(&processed.final_text);
     let mut exported_segments = Vec::with_capacity(segments.len());
@@ -603,6 +618,7 @@ pub fn build_export(
         retention: retention.clone(),
         segmenting,
         artifacts,
+        audio_level,
         raw_text: retention.transcripts.then(|| raw_text.to_string()),
         final_text: retention.transcripts.then_some(final_text),
         processing_steps,
@@ -845,6 +861,16 @@ pub fn render_markdown(export: &MeetingExport) -> String {
             export.segmenting.strategy, export.segmenting.vad_available
         ),
     );
+    if let Some(level) = &export.audio_level {
+        push_field(
+            &mut markdown,
+            "Audio level",
+            &format!(
+                "mean={:.1} dBFS; peak={:.1} dBFS; near_silent={}",
+                level.mean_dbfs, level.peak_dbfs, level.near_silent
+            ),
+        );
+    }
     push_field(
         &mut markdown,
         "Inactivity auto-stop",
@@ -1423,6 +1449,7 @@ mod tests {
                 vad_available: false,
                 detail: "test".to_string(),
             },
+            None,
         );
 
         assert_eq!(export.session.source, "<redacted>");
@@ -1492,6 +1519,7 @@ mod tests {
                 vad_available: false,
                 detail: "test".to_string(),
             },
+            None,
         );
 
         assert_eq!(export.warnings.len(), 4);
@@ -1525,6 +1553,98 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("[repeated phrase loop collapsed]"));
+    }
+
+    #[test]
+    fn export_warns_and_records_structured_field_for_near_silent_capture() {
+        let retention = MeetingRetentionPolicy::from(&RetentionConfig {
+            metadata: true,
+            transcripts: true,
+            audio: false,
+        });
+        let mut session = new_recording_session(NewMeetingSession {
+            mode: "raw".to_string(),
+            session_id: "meeting-silent".to_string(),
+            no_llm: true,
+            device: ":0".to_string(),
+            source: MeetingSourceMetadata::default(),
+            chunk_duration_ms: 30_000,
+            model: "/models/ggml-base.en.bin".to_string(),
+            model_path: "/models/ggml-base.en.bin".to_string(),
+            retention,
+            session_dir: PathBuf::from("/tmp/session"),
+            chunks_dir: PathBuf::from("/tmp/session/chunks"),
+            recorder_stderr_path: PathBuf::from("/tmp/session/capture.stderr"),
+            segments_jsonl_path: PathBuf::from("/tmp/session/segments.jsonl"),
+            json_export_path: PathBuf::from("/tmp/session/transcript.json"),
+            markdown_export_path: PathBuf::from("/tmp/session/transcript.md"),
+        });
+        session.mark_stopped(200, 60_000, 1);
+        let processed = TextProcessingResult {
+            mode: "raw".to_string(),
+            final_text: "you you you".to_string(),
+            processing_steps: vec![ProcessingStep {
+                name: "raw".to_string(),
+            }],
+            warnings: Vec::new(),
+            llm: None,
+        };
+        let segments = vec![MeetingSegment {
+            segment_index: 0,
+            chunk_index: 0,
+            start_ms: 0,
+            end_ms: 60_000,
+            source_label: MeetingSourceLabel::UserMic,
+            source_device: ":0".to_string(),
+            text: "you you you".to_string(),
+            chunk_path: "/tmp/session/chunks/chunk-00000.wav".to_string(),
+        }];
+
+        let audio_level = Some(MeetingAudioLevel {
+            mean_dbfs: -72.0,
+            peak_dbfs: -60.0,
+            near_silent: true,
+        });
+        let export = build_export(
+            &session,
+            &segments,
+            "you you you",
+            &processed,
+            MeetingSegmenting {
+                strategy: "chunk-boundaries".to_string(),
+                vad_available: false,
+                detail: "test".to_string(),
+            },
+            audio_level,
+        );
+
+        assert_eq!(export.audio_level, audio_level);
+        assert!(export
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("near-silent") && warning.contains("-72.0 dBFS")));
+
+        // A loud session carries the structured field but no near-silent warning.
+        let loud = build_export(
+            &session,
+            &segments,
+            "you you you",
+            &processed,
+            MeetingSegmenting {
+                strategy: "chunk-boundaries".to_string(),
+                vad_available: false,
+                detail: "test".to_string(),
+            },
+            Some(MeetingAudioLevel {
+                mean_dbfs: -28.0,
+                peak_dbfs: -6.0,
+                near_silent: false,
+            }),
+        );
+        assert!(!loud
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("near-silent")));
     }
 
     #[test]
