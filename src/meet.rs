@@ -685,14 +685,31 @@ fn non_speech_marker_count(text: &str) -> usize {
         .sum()
 }
 
+/// Number of consecutive identical tokens that flags a runaway single-token
+/// loop (the `you you you …` whisper-on-silence signature).
+const UNIGRAM_RUN_THRESHOLD: usize = 10;
+/// Minimum token count before the "one token dominates the whole transcript"
+/// heuristic is allowed to fire, so short emphatic speech ("no, no, no") never
+/// trips it.
+const UNIGRAM_DOMINANCE_MIN_TOKENS: usize = 20;
+/// Fraction of all tokens a single token must reach to count as a dominant
+/// unigram loop.
+const UNIGRAM_DOMINANCE_RATIO: f64 = 0.6;
+
 fn has_repetition_loop(text: &str) -> bool {
+    has_phrase_repetition_loop(text) || has_dominant_unigram_loop(text)
+}
+
+/// Detect a repeated multi-word phrase run (e.g. a whole sentence emitted five
+/// times in a row).
+fn has_phrase_repetition_loop(text: &str) -> bool {
     let mut previous = String::new();
     let mut run_len = 0usize;
 
     for unit in text
         .split(['.', '!', '?', '\n'])
         .map(normalize_repetition_unit)
-        .filter(|unit| unit.len() >= 12)
+        .filter(|unit| unit.split_whitespace().count() >= 2)
     {
         if unit == previous {
             run_len += 1;
@@ -703,6 +720,46 @@ fn has_repetition_loop(text: &str) -> bool {
 
         if run_len >= 5 {
             return true;
+        }
+    }
+
+    false
+}
+
+/// Detect the single-token whisper-on-silence signature that the phrase-run
+/// check misses: one short token (`you`, `thank`) repeated far more than any
+/// real utterance would. Trips on either a long consecutive run of the same
+/// token, or a single token dominating a sufficiently long transcript.
+fn has_dominant_unigram_loop(text: &str) -> bool {
+    let tokens: Vec<String> = text
+        .split_whitespace()
+        .map(normalize_repetition_unit)
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    let mut run_len = 0usize;
+    let mut previous: Option<&str> = None;
+    for token in &tokens {
+        if previous == Some(token.as_str()) {
+            run_len += 1;
+        } else {
+            previous = Some(token.as_str());
+            run_len = 1;
+        }
+        if run_len >= UNIGRAM_RUN_THRESHOLD {
+            return true;
+        }
+    }
+
+    if tokens.len() >= UNIGRAM_DOMINANCE_MIN_TOKENS {
+        let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for token in &tokens {
+            *counts.entry(token.as_str()).or_default() += 1;
+        }
+        if let Some(max) = counts.values().copied().max() {
+            if max as f64 >= tokens.len() as f64 * UNIGRAM_DOMINANCE_RATIO {
+                return true;
+            }
         }
     }
 
@@ -1676,5 +1733,110 @@ mod tests {
 
         assert!(!changed);
         assert_eq!(collapsed, text);
+    }
+
+    #[test]
+    fn repetition_loop_detects_repeated_single_token_whisper_hallucination() {
+        // The canonical whisper-on-silence artifact: one short token repeated.
+        // The phrase-run check misses it (single tokens are < 12 chars), so the
+        // unigram path must catch it.
+        let text = "you you you you you you you you you you you you";
+        assert!(has_repetition_loop(text));
+        assert!(!has_phrase_repetition_loop(text));
+        assert!(has_dominant_unigram_loop(text));
+    }
+
+    #[test]
+    fn repetition_loop_detects_repeated_token_across_sentences() {
+        // whisper often punctuates the filler ("Thank you. Thank you. ...").
+        let text = "Thank you. ".repeat(12);
+        assert!(has_repetition_loop(&text));
+    }
+
+    #[test]
+    fn repetition_loop_ignores_short_emphatic_repeats() {
+        // Real emphatic speech repeats a token a handful of times: must not trip.
+        assert!(!has_repetition_loop("No, no, no, no, no. Yeah. Thanks."));
+        assert!(!has_repetition_loop(
+            "We shipped the feature and the team is happy with the result."
+        ));
+        assert!(!has_repetition_loop("yes yes yes")); // short run, below threshold
+    }
+
+    #[test]
+    fn repetition_loop_dominance_needs_a_long_transcript() {
+        // A single token dominating a long transcript trips the dominance path
+        // even without a consecutive run long enough to hit UNIGRAM_RUN_THRESHOLD.
+        // "you" is 14/21 (~67%) of >= 20 tokens, with a max run of 2.
+        let dominated = "you you and ".repeat(7);
+        assert!(has_dominant_unigram_loop(&dominated));
+
+        // The same ratio in a short transcript stays quiet.
+        assert!(!has_dominant_unigram_loop("you and you but you"));
+    }
+
+    #[test]
+    fn export_warns_on_degenerate_unigram_transcript_without_audio_level() {
+        // AC: the `you you you...` repro triggers a transcript warning even when
+        // the audio-level path is unavailable (audio_level = None).
+        let session = new_recording_session(NewMeetingSession {
+            mode: "raw".to_string(),
+            session_id: "meeting-unigram".to_string(),
+            no_llm: true,
+            device: ":0".to_string(),
+            source: MeetingSourceMetadata::default(),
+            chunk_duration_ms: 30_000,
+            model: "/models/ggml-base.en.bin".to_string(),
+            model_path: "/models/ggml-base.en.bin".to_string(),
+            retention: MeetingRetentionPolicy::from(&RetentionConfig {
+                metadata: true,
+                transcripts: true,
+                audio: false,
+            }),
+            session_dir: PathBuf::from("/tmp/session"),
+            chunks_dir: PathBuf::from("/tmp/session/chunks"),
+            recorder_stderr_path: PathBuf::from("/tmp/session/capture.stderr"),
+            segments_jsonl_path: PathBuf::from("/tmp/session/segments.jsonl"),
+            json_export_path: PathBuf::from("/tmp/session/transcript.json"),
+            markdown_export_path: PathBuf::from("/tmp/session/transcript.md"),
+        });
+        let text = "you you you you you you you you you you you you";
+        let processed = TextProcessingResult {
+            mode: "raw".to_string(),
+            final_text: text.to_string(),
+            processing_steps: vec![ProcessingStep {
+                name: "raw".to_string(),
+            }],
+            warnings: Vec::new(),
+            llm: None,
+        };
+        let segments = vec![MeetingSegment {
+            segment_index: 0,
+            chunk_index: 0,
+            start_ms: 0,
+            end_ms: 60_000,
+            source_label: MeetingSourceLabel::UserMic,
+            source_device: ":0".to_string(),
+            text: text.to_string(),
+            chunk_path: "/tmp/session/chunks/chunk-00000.wav".to_string(),
+        }];
+
+        let export = build_export(
+            &session,
+            &segments,
+            text,
+            &processed,
+            MeetingSegmenting {
+                strategy: "chunk-boundaries".to_string(),
+                vad_available: false,
+                detail: "test".to_string(),
+            },
+            None,
+        );
+
+        assert!(export
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("repeated phrase loop")));
     }
 }

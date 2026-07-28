@@ -143,7 +143,7 @@ enum Command {
         #[arg(long, default_value_t = DEFAULT_MIN_RECORDING_MS)]
         min_duration_ms: u64,
 
-        /// FFmpeg AVFoundation input device, by name (e.g. "MacBook Pro Microphone") or index (:2). Defaults to COMLINK_RECORD_DEVICE or :0.
+        /// FFmpeg AVFoundation input device, by name (e.g. "MacBook Pro Microphone") or index (:2). Defaults to COMLINK_RECORD_DEVICE, else the system default input device (fallback :0).
         #[arg(long)]
         device: Option<String>,
 
@@ -373,7 +373,7 @@ enum MeetCommand {
         #[arg(long)]
         model: Option<PathBuf>,
 
-        /// FFmpeg AVFoundation input device, by name (e.g. "MacBook Pro Microphone") or index (:2). Defaults to COMLINK_RECORD_DEVICE or :0.
+        /// FFmpeg AVFoundation input device, by name (e.g. "MacBook Pro Microphone") or index (:2). Defaults to COMLINK_RECORD_DEVICE, else the system default input device (fallback :0).
         #[arg(long)]
         device: Option<String>,
 
@@ -545,10 +545,7 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
     let model_path =
         config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
     let runtime = deps::runtime_from_model_path(model_path)?;
-    let device = device
-        .or_else(|| env::var("COMLINK_RECORD_DEVICE").ok())
-        .unwrap_or_else(|| DEFAULT_RECORD_DEVICE.to_string());
-    let device = resolve_mic_device(&device, &runtime.ffmpeg)?;
+    let device = resolve_record_device(device, &runtime.ffmpeg)?;
 
     eprintln!("Recording... press Enter to stop.");
     let captured = record::record_until_enter(record::RecordingOptions {
@@ -909,10 +906,7 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
     let model_path =
         config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
     let runtime = deps::runtime_from_model_path(model_path.clone())?;
-    let device = device
-        .or_else(|| env::var("COMLINK_RECORD_DEVICE").ok())
-        .unwrap_or_else(|| DEFAULT_RECORD_DEVICE.to_string());
-    let device = resolve_mic_device(&device, &runtime.ffmpeg)?;
+    let device = resolve_record_device(device, &runtime.ffmpeg)?;
     let source_mode =
         meet::MeetSourceMode::parse(source).ok_or_else(|| ComlinkError::InvalidConfigValue {
             name: "meet start --source",
@@ -1071,6 +1065,38 @@ fn resolve_mic_device(device: &str, ffmpeg: &Path) -> Result<String, ComlinkErro
     system_audio::resolve_capture_device(device, ffmpeg)
         .map(|resolved| resolved.avfoundation_input)
         .map_err(ComlinkError::AudioCaptureFailed)
+}
+
+/// Resolve the microphone capture device for `record` / `meet start`.
+///
+/// Precedence: an explicit `--device`, then `COMLINK_RECORD_DEVICE`, then the
+/// system (CoreAudio) default input device, then the hardcoded `:0` fallback.
+/// Named selectors (an explicit name or the resolved system default) are mapped
+/// to their current AVFoundation index; numeric selectors pass through.
+fn resolve_record_device(device: Option<String>, ffmpeg: &Path) -> Result<String, ComlinkError> {
+    if let Some(requested) = device
+        .or_else(|| env::var("COMLINK_RECORD_DEVICE").ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return resolve_mic_device(&requested, ffmpeg);
+    }
+
+    if let Some(matched) = system_audio::resolve_default_input_device(ffmpeg) {
+        match &matched.name {
+            Some(name) => eprintln!(
+                "Using system default input device: {name} ({})",
+                matched.avfoundation_input
+            ),
+            None => eprintln!(
+                "Using system default input device {}",
+                matched.avfoundation_input
+            ),
+        }
+        return Ok(matched.avfoundation_input);
+    }
+
+    Ok(DEFAULT_RECORD_DEVICE.to_string())
 }
 
 fn resolve_system_audio_device(
@@ -1411,6 +1437,8 @@ fn meet_stop(options: MeetStopOptions) -> Result<(), ComlinkError> {
         store.delete_chunks(&session)?;
     }
 
+    emit_stop_warning_banner(&export.warnings);
+
     print_meet_stop(
         &MeetStopStatus {
             schema_version: meet::MEETING_SCHEMA_VERSION,
@@ -1446,6 +1474,20 @@ fn meeting_audio_level(chunks: &[meet::MeetingChunk]) -> Option<meet::MeetingAud
         peak_dbfs: level.peak_dbfs,
         near_silent: level.is_near_silent(),
     })
+}
+
+/// Print any meeting warnings as a clearly delimited banner on stderr so a
+/// near-silent or degenerate capture cannot be overlooked, regardless of
+/// `--format`. stdout still carries only the structured status payload.
+fn emit_stop_warning_banner(warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    eprintln!("===================== WARNING =====================");
+    for warning in warnings {
+        eprintln!("- {warning}");
+    }
+    eprintln!("==================================================");
 }
 
 fn meeting_duration_ms(chunks: &[meet::MeetingChunk]) -> u64 {

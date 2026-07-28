@@ -360,6 +360,66 @@ pub fn resolve_capture_device(requested: &str, ffmpeg: &Path) -> Result<DeviceMa
     resolve_avfoundation_audio_device(requested, &devices).map_err(|error| error.to_string())
 }
 
+/// Resolve the system (CoreAudio) default *input* device to an AVFoundation
+/// capture selector, reusing the same name-lookup used for `--device`.
+///
+/// Best-effort: returns `None` when the default input cannot be determined
+/// (non-macOS, `system_profiler` unavailable/parse failure) or when the default
+/// device does not appear in the AVFoundation audio device list. Callers fall
+/// back to the hardcoded `:0` selector in that case.
+pub fn resolve_default_input_device(ffmpeg: &Path) -> Option<DeviceMatch> {
+    let name = read_coreaudio_default_input_name()?;
+    let devices = list_avfoundation_audio_devices(ffmpeg).ok()?;
+    resolve_avfoundation_audio_device(&name, &devices).ok()
+}
+
+/// Read the CoreAudio default input device name via `system_profiler`. macOS
+/// only; returns `None` (never errors) so it can drive a best-effort default.
+fn read_coreaudio_default_input_name() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let output = Command::new("system_profiler")
+        .args(["SPAudioDataType", "-json"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_default_input_name(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Pure parser for `system_profiler SPAudioDataType -json`: return the `_name`
+/// of the device flagged as the CoreAudio default input
+/// (`coreaudio_default_audio_input_device == "spaudio_yes"`). Walks the JSON
+/// structurally so it is resilient to grouping/nesting changes.
+pub fn parse_default_input_name(json: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    find_default_input_name(&value)
+}
+
+fn find_default_input_name(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_default = map
+                .get("coreaudio_default_audio_input_device")
+                .and_then(serde_json::Value::as_str)
+                == Some("spaudio_yes");
+            if is_default {
+                if let Some(name) = map.get("_name").and_then(serde_json::Value::as_str) {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        return Some(name.to_string());
+                    }
+                }
+            }
+            map.values().find_map(find_default_input_name)
+        }
+        serde_json::Value::Array(items) => items.iter().find_map(find_default_input_name),
+        _ => None,
+    }
+}
+
 fn report_from_snapshot(
     snapshot: SystemAudioProbeSnapshot,
     preferred_device: Option<String>,
@@ -890,5 +950,65 @@ mod tests {
         let resolved = resolve_avfoundation_audio_device("Microphone", &devices).unwrap();
         assert_eq!(resolved.avfoundation_input, ":0");
         assert_eq!(resolved.name.as_deref(), Some("Microphone"));
+    }
+
+    // Trimmed shape of real `system_profiler SPAudioDataType -json` output, with
+    // several input-capable virtual devices present alongside the builtin mic
+    // that CoreAudio flags as the default input.
+    const SAMPLE_SP_AUDIO_JSON: &str = r#"{
+      "SPAudioDataType": [
+        {
+          "_name": "Devices",
+          "_items": [
+            { "_name": "BlackHole 2ch", "coreaudio_device_input": 2 },
+            { "_name": "Aggregate Device", "coreaudio_device_input": 2 },
+            {
+              "_name": "MacBook Pro Microphone",
+              "coreaudio_device_input": 1,
+              "coreaudio_default_audio_input_device": "spaudio_yes"
+            },
+            { "_name": "Microsoft Teams Audio", "coreaudio_device_input": 1 }
+          ]
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn parses_coreaudio_default_input_name_from_system_profiler_json() {
+        assert_eq!(
+            parse_default_input_name(SAMPLE_SP_AUDIO_JSON).as_deref(),
+            Some("MacBook Pro Microphone")
+        );
+    }
+
+    #[test]
+    fn parse_default_input_name_returns_none_when_no_device_is_flagged() {
+        let json = r#"{"SPAudioDataType":[{"_items":[{"_name":"BlackHole 2ch","coreaudio_device_input":2}]}]}"#;
+        assert_eq!(parse_default_input_name(json), None);
+        assert_eq!(parse_default_input_name("not json"), None);
+    }
+
+    #[test]
+    fn default_input_name_maps_to_avfoundation_index() {
+        // The CoreAudio default-input name resolves against the AVFoundation
+        // enumeration to its current index, reusing the --device machinery.
+        let devices = vec![
+            "Aggregate Device".to_string(),
+            "BlackHole 2ch".to_string(),
+            "MacBook Pro Microphone".to_string(),
+        ];
+        let name = parse_default_input_name(SAMPLE_SP_AUDIO_JSON).unwrap();
+        let resolved = resolve_avfoundation_audio_device(&name, &devices).unwrap();
+        assert_eq!(resolved.avfoundation_input, ":2");
+        assert_eq!(resolved.name.as_deref(), Some("MacBook Pro Microphone"));
+    }
+
+    #[test]
+    fn default_input_absent_from_avfoundation_list_does_not_resolve() {
+        // Present in system_profiler but not in the AVFoundation list -> callers
+        // fall back to :0 rather than guessing.
+        let devices = vec!["Aggregate Device".to_string(), "BlackHole 2ch".to_string()];
+        let name = parse_default_input_name(SAMPLE_SP_AUDIO_JSON).unwrap();
+        assert!(resolve_avfoundation_audio_device(&name, &devices).is_err());
     }
 }
