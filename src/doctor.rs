@@ -116,13 +116,39 @@ fn build_report(resolved: &ResolvedConfig, dependencies: &DependencyReport) -> D
     ];
     checks.push(system_audio_check(&system_audio));
 
-    let record_device = std::env::var("COMLINK_RECORD_DEVICE").unwrap_or_else(|_| ":0".to_string());
+    let record_device_detail = match std::env::var("COMLINK_RECORD_DEVICE") {
+        Ok(device) => {
+            format!("record uses FFmpeg AVFoundation input device {device} (COMLINK_RECORD_DEVICE)")
+        }
+        Err(_) => {
+            let ffmpeg = match &dependencies.ffmpeg {
+                DependencyState::Found(path) => Some(path.clone()),
+                _ => None,
+            };
+            match ffmpeg
+                .as_deref()
+                .and_then(system_audio::resolve_default_input_device)
+            {
+                Some(matched) => match matched.name {
+                    Some(name) => format!(
+                        "record defaults to the system default input device {name} ({})",
+                        matched.avfoundation_input
+                    ),
+                    None => format!(
+                        "record defaults to the system default input device {}",
+                        matched.avfoundation_input
+                    ),
+                },
+                None => "record defaults to AVFoundation input device :0 (system default input could not be resolved)".to_string(),
+            }
+        }
+    };
     checks.push(DoctorCheck {
         name: "microphone".to_string(),
         status: "info".to_string(),
         required: false,
         path: None,
-        detail: format!("record uses FFmpeg AVFoundation input device {record_device}"),
+        detail: record_device_detail,
         remediation: "grant Terminal microphone permission in macOS Privacy & Security; override with COMLINK_RECORD_DEVICE or record --device".to_string(),
     });
 

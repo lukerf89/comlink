@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# LF-38: pin the record/meet input device so these hermetic suites do not
+# exercise the platform-dependent system-default-input resolution (that path
+# is covered by unit tests). Callers may still override.
+export COMLINK_RECORD_DEVICE="${COMLINK_RECORD_DEVICE:-:0}"
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 fixture="$repo_root/tests/fixtures/audio/short.wav"
 artifact_dir="$repo_root/docs/validation/artifacts/phase-1"
