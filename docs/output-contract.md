@@ -83,7 +83,7 @@ A meeting session's `status` is one of:
 - `stopped`: the transcript exports are written.
 - `failed`: a detached finalize failed, or a synchronous `meet stop` failed after ASR (an export write or the chunk cleanup). The session carries an `error` string (error text only, never transcript content). Rerun `comlink meet finalize <id>` to retry.
 
-`transcribing` and `failed` are additive in Phase 10a. A plain synchronous `meet stop` never produces them.
+`transcribing` and `failed` are additive in Phase 10a. A plain synchronous `meet stop` never produces `transcribing`, and it produces `failed` only when it fails after ASR (an export write or the chunk cleanup). A successful synchronous stop ends `stopped` as before.
 
 ### `meet stop --detach`
 
@@ -111,7 +111,8 @@ This finishes a `transcribing` or `failed` session and prints the same payload s
 
 - On a `stopped` session it reprints the stop payload, rebuilt from the validated JSON export, without running ASR again. If the session's `retention.audio` is `false` and chunk WAVs are still on disk (a cleanup that failed, or a session finished before this ordering existed), it deletes them first.
 - If an earlier finalize crashed after the exports were written, it recovers from the validated JSON export and regenerates the Markdown and JSONL.
-- A `stopped` session with no valid JSON export but with chunk WAVs on disk (a synchronous `meet stop` whose ASR failed) is transcribed as if it were `transcribing`.
+- A `stopped` session with no JSON export at all but with chunk WAVs on disk (a synchronous `meet stop` whose ASR failed) is transcribed as if it were `transcribing`.
+- An existing JSON export is never overwritten: if it exists but fails validation while chunks remain (in any status), finalize exits 1 with `MeetingExportInvalid` and says to fix or remove the export at `<path>`, then rerun `comlink meet finalize <id>`.
 - On a `recording` session it exits 1.
 
 Finalize commits `stopped` only as its last step: exports are written, then (when `retention.audio` is `false`) the chunk WAVs are deleted, then the session is saved as `stopped`. If the chunk cleanup fails, the session is marked `failed` with an `error` that names the cleanup (`meeting audio chunk cleanup failed ...`), the command exits `1`, and a rerun of `meet finalize <id>` recovers from the export and retries the cleanup. Chunks are never deleted while the session's `retention.audio` is `true`.

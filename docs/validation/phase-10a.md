@@ -182,7 +182,7 @@ cargo test --test meet_lifecycle --test meet_service   # 3 more runs, all green
 - **M2 (privacy): synchronous `meet stop` now uses the finalize ordering.** After ASR, sync stop writes the exports, deletes unretained chunks, then saves the final `stopped`. If the delete fails, it saves `failed` with the cleanup error (and `chunks_processed`) and returns `MeetingChunkCleanupFailed` (exit 1). `meet finalize <id>` then recovers from the export with no ASR, deletes the chunks, and commits `stopped`. The preliminary `stopped` save before ASR is unchanged, so an ASR failure still leaves `stopped` without exports. Successful stop stdout is unchanged (goldens byte-identical).
 - **M3a.** The `MeetingChunkCleanupFailed` reason is `could not delete <chunks_dir>: <io error>`.
 - **M3b.** On the finalizer launch-failure path, a failure to clear the active-session pointer is appended to `finalize.log` (with the original launch error) instead of being dropped.
-- **M3c (restriction).** On a `stopped` session, `meet finalize` falls through to ASR only when no JSON export exists at all. A JSON export that exists but fails validation (for example, a user-edited file) returns `MeetingExportUnavailable` (exit 1). The export, the chunks and the session state are left untouched, so the user's edit is never silently overwritten. ~~`transcribing` and `failed` sessions are unchanged: an invalid export there is still rewritten from the chunks, because it can only come from an interrupted finalize.~~ Corrected in the final round (N3): that claim stopped being true once M2 let a synchronous stop leave `failed` sessions with complete exports, and the JSON export is written atomically, so an interrupted finalize leaves it absent or complete, never invalid. The don't-overwrite rule now applies in every status.
+- **M3c (restriction).** On a `stopped` session, `meet finalize` falls through to ASR only when no JSON export exists at all. A JSON export that exists but fails validation (for example, a user-edited file) returns `MeetingExportInvalid` (exit 1; this round shipped it as `MeetingExportUnavailable`, and the final round (N3) replaced it with the dedicated variant). The export, the chunks and the session state are left untouched, so the user's edit is never silently overwritten. ~~`transcribing` and `failed` sessions are unchanged: an invalid export there is still rewritten from the chunks, because it can only come from an interrupted finalize.~~ Corrected in the final round (N3): that claim stopped being true once M2 let a synchronous stop leave `failed` sessions with complete exports, and the JSON export is written atomically, so an interrupted finalize leaves it absent or complete, never invalid. The don't-overwrite rule now applies in every status.
 
 ### Tests added
 
@@ -288,6 +288,25 @@ Flake note: in one of about 40 full `meet_lifecycle` + `meet_service` runs (the 
 - `meet finalize` still deletes only the recorded chunks dir. After a data-dir move, the audit reports the on-disk WAVs (N2), but they are removed by hand.
 - `meet status` on a session whose chunks dir cannot be inspected now fails with an error naming the path, where before a non-searchable parent read as `chunk_count: 0`. A missing session still reports `none`.
 - The N1 tests use `chmod 000`, so they cannot fail as root. The suite is not run as root.
+
+## Rebase Round (onto origin/main after LF-80)
+
+### Changes
+
+- Rebased all branch commits onto `origin/main` (09691f2, LF-80). There were no textual conflicts.
+- LF-80's `resolve_record_device_full` / `resolve_record_device` wrappers and its `record_memo` and doctor changes are intact. `meet start` still resolves the mic through `resolve_record_device`.
+- `src/cli.rs`: dropped the now-unused `env` import. LF-80 removed the last `env::` use from `cli.rs`, and this branch had already moved `resolve_system_audio_device` into `meet_service`.
+- Doc truth:
+  - `docs/output-contract.md` no longer claims that a synchronous `meet stop` never produces `failed`.
+  - The `meet finalize` recovery bullets now state that only a missing JSON export is rebuilt, and that an invalid one returns `MeetingExportInvalid`.
+  - The M3c note above now names `MeetingExportInvalid`.
+
+### Known limitation: `finalize_reports_busy_while_another_process_holds_the_lock` is load-sensitive
+
+- **Not reproduced:** 0 failures in 25 further runs of the `meet_service` suite at `--test-threads=16` after the rebase, on top of the 45 clean runs above.
+- **Analysis:** the lock assertion itself is deterministic. The test holds the kernel `flock` in-process, the child `meet finalize` gets a 1 s wait, and flock is per open file description, so the child always sees `busy`. The timing-dependent part is the fixture. `ServiceHarness::transcribing_session()` starts real mock recorders, waits in real time for 2 chunks, and then calls `stop_detached(.., 5 s).unwrap()`. On a saturated machine that setup (or the mock whisper run in the second `meet finalize`) can exceed its budget.
+- **Why it is left as is:** the timeouts were not raised. The deterministic fix is a `transcribing` session fixture that writes the session state and chunk WAVs directly, with no live recorders. That is follow-up work.
+- **If it recurs:** capture the panic message, which tells a setup timeout apart from a lock assertion.
 
 ## Manual Test Instructions (pause gate)
 
