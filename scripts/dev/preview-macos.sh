@@ -9,7 +9,10 @@ swift build --package-path "$repo_root/prototypes/macos"
 bin_dir="$(swift build --package-path "$repo_root/prototypes/macos" --show-bin-path)"
 app_dir="$repo_root/prototypes/macos/.build/Comlink Preview.app"
 mkdir -p "$app_dir/Contents/MacOS"
-cp "$bin_dir/ComlinkPreview" "$app_dir/Contents/MacOS/ComlinkPreview"
+# Replace the signed Mach-O atomically. Overwriting a running executable in
+# place can leave macOS with a stale code-signature cache and cause SIGKILL.
+cp "$bin_dir/ComlinkPreview" "$app_dir/Contents/MacOS/.ComlinkPreview.new"
+mv -f "$app_dir/Contents/MacOS/.ComlinkPreview.new" "$app_dir/Contents/MacOS/ComlinkPreview"
 cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -24,6 +27,8 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>
 PLIST
+# Local development signature includes the bundle plist and resources.
+codesign --force --sign - "$app_dir"
 printf 'Preview app: %s\n' "$app_dir"
 if [[ "${1:-}" != --build-only ]]; then
   open "$app_dir"

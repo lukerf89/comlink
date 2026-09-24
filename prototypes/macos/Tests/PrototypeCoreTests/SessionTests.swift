@@ -14,6 +14,7 @@ func expectFalse(_ value: Bool, _ message: String = "", file: StaticString = #fi
 @main
 struct SessionTests {
     static func main() {
+        runHotkeyTests()
         let suite = SessionTests()
         suite.testPrimaryFlowPreservesOriginalAndMode()
         suite.testCancelDiscardsPendingCompletionAndRestartRejectsOldResult()

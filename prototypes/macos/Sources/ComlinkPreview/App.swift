@@ -20,15 +20,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var pill: NSPanel!
     var result: NSPanel!
     var palette: NSPanel!
+    var hotkeySettings: NSPanel!
+    let hotkeyInput = HotkeyInputAdapter()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         let menu = NSMenu()
-        menu.addItem(item("Start / stop dictation preview", #selector(toggle), key: " ", modifiers: .option))
+        menu.addItem(item("Start / stop dictation preview", #selector(toggle)))
         menu.addItem(item("Stop dictation", #selector(stop)))
         menu.addItem(item("Cancel dictation", #selector(cancel)))
         menu.addItem(.separator())
         menu.addItem(item("Command palette…", #selector(showPalette), key: "k"))
+        menu.addItem(item("Hotkey settings…", #selector(showHotkeys), key: ","))
         menu.addItem(item("Preview controls…", #selector(showGuide)))
         menu.addItem(.separator())
         menu.addItem(item("Quit Comlink Preview", #selector(quit), key: "q"))
@@ -54,6 +57,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         pill = panel(PillView(model: model), title: "Comlink Recording Pill")
         result = panel(ResultView(model: model), title: "Comlink Result")
         palette = panel(PaletteView(model: model), title: "Comlink Command Palette")
+        hotkeySettings = panel(HotkeySettingsView(model: model), title: "Comlink Hotkey Settings")
+        (hotkeySettings as? FloatingPanel)?.onEscape = { [weak self] in self?.hotkeySettings.orderOut(nil) }
         (guide as? FloatingPanel)?.onEscape = { [weak self] in self?.guide.orderOut(nil) }
         (pill as? FloatingPanel)?.onEscape = { [weak self] in self?.model.cancel() }
         (result as? FloatingPanel)?.onEscape = { [weak self] in self?.model.reset() }
@@ -62,7 +67,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         model.openPalette = { [weak self] in self?.showPalette() }
         model.closePalette = { [weak self] in self?.palette.orderOut(nil) }
         model.openGuide = { [weak self] in self?.showGuide() }
+        model.openHotkeySettings = { [weak self] in self?.showHotkeys() }
+        model.updateHotkeyInput = { [weak self] in self?.configureHotkeys() }
+        model.openAccessibility = { [weak self] in self?.hotkeyInput.openAccessibilitySettings() }
+        model.gesture = RecordingGesture(window: model.hotkeys.doublePressWindow)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(willSleep), name: NSWorkspace.willSleepNotification, object: nil)
+        configureHotkeys()
         showGuide()
+    }
+
+    private func configureHotkeys() {
+        model.cancelHotkeyForSettingsOrSleep()
+        model.hotkeyStatus = hotkeyInput.configure(model.hotkeys, onChange: { [weak self] down, time in
+            self?.model.hotkeyChanged(down: down, at: time)
+        }, onInterrupt: { [weak self] in self?.model.interruptHotkey() }, onAccessLost: { [weak self] in
+            self?.model.cancelHotkeyForSettingsOrSleep()
+            self?.model.hotkeyStatus = "Accessibility access lost · Recheck access in Hotkey settings"
+        })
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        if !hotkeyInput.observesAcrossApps { model.cancelHotkeyForSettingsOrSleep() }
+    }
+    func applicationWillTerminate(_ notification: Notification) {
+        hotkeyInput.stop()
+        model.cancelHotkeyForSettingsOrSleep()
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+    @objc private func willSleep() { model.cancelHotkeyForSettingsOrSleep() }
+    @objc private func showHotkeys() {
+        position(hotkeySettings)
+        NSApp.activate(ignoringOtherApps: true)
+        hotkeySettings.makeKeyAndOrderFront(nil)
     }
 
     private func item(_ title: String, _ action: Selector, key: String = "", modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem {
@@ -98,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func render() {
         pill.orderOut(nil)
         result.orderOut(nil)
-        if model.session.stage != .idle { guide.orderOut(nil) }
+        if model.session.stage != .idle { guide.orderOut(nil); hotkeySettings.orderOut(nil) }
         switch model.session.stage {
         case .idle: break
         case .listening, .processing:
@@ -135,6 +171,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct PreviewApp {
     @MainActor static func main() {
+        if CommandLine.arguments.contains("--check-startup") {
+            let model = PreviewModel()
+            precondition(RecordingKey.allCases.contains(model.hotkeys.key))
+            print("{\"startup\":\"ok\"}")
+            return
+        }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate

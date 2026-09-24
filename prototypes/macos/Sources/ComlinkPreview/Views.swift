@@ -32,6 +32,8 @@ struct GuideView: View {
                 HStack {
                     Image(systemName: "waveform").font(.title2)
                     Text("Comlink").font(.title2.weight(.semibold))
+                    Button(action: model.openHotkeySettings) { Image(systemName: "gearshape") }
+                        .buttonStyle(.plain).accessibilityLabel("Hotkey settings")
                     Spacer()
                     Text("DESIGN PREVIEW").font(.system(size: 10, weight: .semibold)).tracking(1.4).foregroundStyle(.secondary)
                 }
@@ -59,7 +61,7 @@ struct GuideView: View {
                 Text("Start from here or the menu-bar waveform. Stop with the square in the pill. The palette stays closed throughout dictation.")
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 Divider()
-                Text("Sample text only. Copy uses your clipboard. Insert demonstrates a recoverable failure; no text is sent to another app. Shortcuts apply only while this preview is focused.")
+                Text("Sample text only. Copy uses your clipboard. Insert demonstrates a recoverable failure; no text is sent to another app. Fn holds to record; double Fn locks recording. Hotkey settings control cross-app use.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 LocalFooter()
             }
@@ -74,18 +76,22 @@ struct PillView: View {
 
     var body: some View {
         HStack(spacing: 17) {
-            Image(systemName: "mic.fill").font(.system(size: 19))
+            Image(systemName: model.isHotkeyLocked ? "lock.fill" : "mic.fill").font(.system(size: 19))
                 .frame(width: 38, height: 38).background(.white.opacity(0.08), in: Circle())
                 .accessibilityHidden(true)
             if model.session.stage == .listening {
                 TimelineView(.periodic(from: .now, by: reduceMotion ? 1 : 0.25)) { context in
-                    HStack(spacing: 3) {
+                    VStack(spacing: 3) {
+                      HStack(spacing: 3) {
                         ForEach(heights.indices, id: \.self) { i in
                             Capsule().fill(.white.opacity(i > 12 ? 0.45 : 0.9))
                                 .frame(width: 3, height: heights[i] * (reduceMotion ? 0.7 : (0.65 + 0.3 * sin(context.date.timeIntervalSince1970 * 4 + Double(i)))))
                         }
+                      }.frame(height: 30)
+                      Text(model.isHotkeyLocked ? "Locked · \(model.hotkeys.key.label) to stop" : "Listening")
+                          .font(.system(size: 9)).fixedSize()
                     }.frame(width: 100, height: 42)
-                }.accessibilityLabel("Listening, simulated waveform")
+                }.accessibilityLabel(model.isHotkeyLocked ? "Recording locked. Press \(model.hotkeys.key.label) to stop." : "Listening, simulated waveform")
                 TimelineView(.periodic(from: .now, by: 1)) { context in
                     let elapsed = max(0, Int(context.date.timeIntervalSince(model.startedAt)))
                     Text(String(format: "%d:%02d", elapsed / 60, elapsed % 60))
@@ -275,7 +281,9 @@ struct PaletteView: View {
         activate(actions[selection])
     }
     private func activate(_ action: PaletteAction) {
-        if action == .dictate { model.start() } else { detail = action }
+        if action == .dictate { model.start() }
+        else if action == .hotkeys { model.closePalette(); model.openHotkeySettings() }
+        else { detail = action }
     }
     private func symbol(_ action: PaletteAction) -> String {
         switch action {
@@ -284,6 +292,7 @@ struct PaletteView: View {
         case .history: return "clock"
         case .vocabulary: return "book"
         case .review: return "text.alignleft"
+        case .hotkeys: return "keyboard"
         }
     }
     @ViewBuilder private func detailContent(_ action: PaletteAction) -> some View {

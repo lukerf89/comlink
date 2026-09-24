@@ -9,3 +9,14 @@ Scope: a native, executable design prototype and implementation proposal. No pro
 5. Launch the native app, inspect and interact with its surfaces, capture synthetic-only previews, run Swift tests and the four required Rust gates, and open a PR for design review.
 
 The existing plan status table stops at Phase 4, while code and validation reports extend through later phases. Do not infer human approval from those files; reconcile manual acceptance before scheduling production integration.
+
+## Follow-up: Fn hotkeys (2026-09-24)
+
+Luke approved the visual preview and requested hotkey settings: Fn by default,
+double Fn locks recording until another Fn press. Interpret single Fn as
+hold-to-talk. Add persisted preview-only settings, a tested gesture state
+machine, native modifier-event adapters (local plus opt-in accessibility-gated
+cross-app observation), visible locked feedback, and an interactive gesture test.
+Keep ASR simulated and preserve the production Rust CLI. Document macOS Fn/Globe
+conflicts without changing system settings. Re-run native checks and the Rust
+gate, launch/inspect settings and locked states, and update PR #16.

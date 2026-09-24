@@ -87,6 +87,7 @@ public enum PaletteAction: String, CaseIterable {
     case history = "Search history"
     case vocabulary = "Vocabulary & snippets"
     case review = "Review last transcript"
+    case hotkeys = "Hotkey settings"
 
     public static func matching(_ query: String) -> [Self] {
         allCases.filter { query.isEmpty || $0.rawValue.localizedCaseInsensitiveContains(query) }
