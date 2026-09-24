@@ -52,6 +52,19 @@ Any bug you find while running the phase E2E must become a test, fixture,
 diagnostic check, or a documented known-limitation **before** you report done.
 Prefer normalized/contains assertions and schema checks over exact ASR equality.
 
+Lessons from earlier agent runs (details in
+`docs/validation/phase-10-agent-batch.md`):
+
+- Cross-model review covers the **whole branch diff** vs `origin/main`, not one
+  commit. A fast, empty review of a large diff counts as no review.
+- Privacy false-cleans come in families (corrupt state, unreadable/moved dirs,
+  early-return error paths). When fixing one, test its siblings.
+- Anything that can run under a long-lived parent (the `comlink mcp` server)
+  must reap its children, with a test that proves no zombies are left.
+- Do branch work in a worktree; leave the main checkout on `main`.
+- Phase E2E scripts rewrite committed artifacts. Revert other phases' artifacts
+  before committing.
+
 ## Per-phase deliverables (match existing conventions)
 
 - Code + tests for the scoped phase only.
