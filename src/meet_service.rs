@@ -1485,18 +1485,31 @@ pub fn transcript(
         MeetingStatus::Stopped => {}
     }
     check_transcript_confined(&store, &id, &session)?;
-    let export = store.validate_export_for_recovery(&session)?;
+    // The bytes validated are the bytes returned: both exports are read once,
+    // from the session's own directory, without following symlinks.
+    let json_bytes = read_transcript_file(&store, &id, meet::JSON_EXPORT_FILE)?;
+    let json_path = store.root().join(&id).join(meet::JSON_EXPORT_FILE);
+    let export = meet::FileMeetingStore::validate_export_bytes(&session, &json_path, &json_bytes)?;
     let (format, content) = match kind {
-        meet::MeetingExportKind::Markdown => (
-            "md",
-            serde_json::Value::String(store.read_export(&id, kind)?),
-        ),
-        meet::MeetingExportKind::Json => {
-            let text = store.read_export(&id, kind)?;
-            let value = serde_json::from_str(&text).map_err(|error| {
+        meet::MeetingExportKind::Markdown => {
+            let bytes = read_transcript_file(&store, &id, meet::MARKDOWN_EXPORT_FILE)?;
+            let markdown = String::from_utf8(bytes).map_err(|error| {
                 ComlinkError::MeetingExportUnavailable(PathBuf::from(format!(
                     "{} ({error})",
-                    session.json_export_path
+                    store
+                        .root()
+                        .join(&id)
+                        .join(meet::MARKDOWN_EXPORT_FILE)
+                        .display()
+                )))
+            })?;
+            ("md", serde_json::Value::String(markdown))
+        }
+        meet::MeetingExportKind::Json => {
+            let value = serde_json::from_slice(&json_bytes).map_err(|error| {
+                ComlinkError::MeetingExportUnavailable(PathBuf::from(format!(
+                    "{} ({error})",
+                    json_path.display()
                 )))
             })?;
             ("json", value)
@@ -1552,6 +1565,28 @@ fn check_transcript_confined(
         }
     }
     Ok(())
+}
+
+/// Read one of a session's export files with
+/// [`meet::FileMeetingStore::read_session_file_nofollow`]; any failure
+/// (missing, a symlink, not a regular file) is `MeetingExportUnavailable`.
+fn read_transcript_file(
+    store: &meet::FileMeetingStore,
+    id: &str,
+    name: &str,
+) -> Result<Vec<u8>, ComlinkError> {
+    store.read_session_file_nofollow(id, name).map_err(|error| {
+        let reason = if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+            "a symlink; transcripts are only read from regular files in the session directory"
+                .to_string()
+        } else {
+            error.to_string()
+        };
+        ComlinkError::MeetingExportUnavailable(PathBuf::from(format!(
+            "{} ({reason})",
+            store.root().join(id).join(name).display()
+        )))
+    })
 }
 
 /// The recorded finalize error of a `failed` session. A failed session with

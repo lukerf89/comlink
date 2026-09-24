@@ -1895,16 +1895,7 @@ fn stop_signals_the_whole_recorder_process_group() {
         });
         let ctx = harness.ctx(Arc::new(NoopLauncher));
         let started = harness.start(&ctx, 2);
-        let pid_file = harness.root.join("descendant.pid");
-        let descendant: u32 = loop {
-            if let Some(pid) = fs::read_to_string(&pid_file)
-                .ok()
-                .and_then(|text| text.trim().parse().ok())
-            {
-                break pid;
-            }
-            std::thread::sleep(Duration::from_millis(20));
-        };
+        let descendant = read_pid_file(&harness.root.join("descendant.pid"));
         // The descendant is in the recorder's group, not the test's.
         let pgid = std::process::Command::new("ps")
             .args(["-o", "pgid=", "-p", &descendant.to_string()])
@@ -1923,6 +1914,67 @@ fn stop_signals_the_whole_recorder_process_group() {
         // Stopping the meeting stops everything the recorder started.
         common::assert_reaped(descendant, Duration::from_secs(5));
     }
+}
+
+fn read_pid_file(path: &Path) -> u32 {
+    loop {
+        if let Some(pid) = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| text.trim().parse().ok())
+        {
+            return pid;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn pid_is_live(pid: u32) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    !state.is_empty() && !state.starts_with('Z')
+}
+
+#[test]
+fn a_capture_that_outlives_its_recorder_leader_is_live_and_stopped() {
+    let harness = ServiceHarness::new(MockOptions {
+        leader_exits_leaving_capture: true,
+        ..MockOptions::default()
+    });
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let started = harness.start(&ctx, 2);
+    let capture = read_pid_file(&harness.root.join("capture-descendant.pid"));
+    // The recorder leader exits (and is reaped); its capture child keeps going.
+    common::assert_reaped(started.recorder_pid, Duration::from_secs(5));
+    assert!(pid_is_live(capture));
+
+    // Still a live recording: not stale, and not reclaimable by a new start.
+    let status = serde_json::to_value(meet_service::status(&ctx, None).unwrap()).unwrap();
+    assert_eq!(status["status"], "recording", "{status:#}");
+    assert_eq!(status["stale"], false, "{status:#}");
+    assert_eq!(status["recorders"][0]["alive"], true, "{status:#}");
+    let error = meet_service::start(
+        &ctx,
+        meet_service::StartRequest {
+            mode: "raw".to_string(),
+            device: ":0".to_string(),
+            source: meet::MeetSourceMode::MicOnly,
+            system_device: None,
+            chunk_seconds: 30,
+            no_llm: true,
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingAlreadyActive(ref id) if *id == started.session_id),
+        "{error}"
+    );
+
+    // Stop reaches the capture through the recorder's process group.
+    meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+    common::assert_reaped(capture, Duration::from_secs(5));
 }
 
 #[test]
@@ -2069,6 +2121,52 @@ fn transcript_only_reads_files_inside_the_requested_session_directory() {
             .session_id,
         third
     );
+
+    // An export swapped for a symlink that stays inside the session directory
+    // passes the path check, but the read itself never follows a symlink
+    // (this is what closes a check-then-swap race).
+    let fourth = stopped_meeting(&harness);
+    let dir = store.root().join(&fourth);
+    fs::remove_file(dir.join("transcript.md")).unwrap();
+    std::os::unix::fs::symlink(dir.join("segments.jsonl"), dir.join("transcript.md")).unwrap();
+    let error = meet_service::transcript(&ctx, Some(fourth.clone()), md()).unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingExportUnavailable(ref path) if path.display().to_string().contains("a symlink")),
+        "{error}"
+    );
+}
+
+#[test]
+fn read_session_file_nofollow_reads_only_plain_regular_files_in_a_session() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let store = harness.store();
+    let id = stopped_meeting(&harness);
+    let bytes = store
+        .read_session_file_nofollow(&id, "transcript.md")
+        .unwrap();
+    assert_eq!(
+        bytes,
+        fs::read(store.root().join(&id).join("transcript.md")).unwrap()
+    );
+    for (bad_id, name) in [
+        ("..", "transcript.md"),
+        ("", "transcript.md"),
+        (id.as_str(), "../session.json"),
+        (id.as_str(), "chunks"),
+    ] {
+        assert!(
+            store.read_session_file_nofollow(bad_id, name).is_err(),
+            "{bad_id}/{name}"
+        );
+    }
+    // A FIFO is refused instead of blocking the caller.
+    let fifo = store.root().join(&id).join("fifo");
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .unwrap()
+        .success());
+    assert!(store.read_session_file_nofollow(&id, "fifo").is_err());
 }
 
 #[test]

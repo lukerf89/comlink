@@ -172,13 +172,33 @@ wins; the E2E fails when artifact redaction or the `lsof` probe fails;
 atomic config writes (symlinked `config.json`) documented; a brittle
 serde-wording assertion loosened.
 
+Confirming Codex re-review of the fix commits (229 s): P1 (start race), P2
+(config race) and P5 (reaper diagnostics) fixed; P3 and P4 partially fixed,
+with two new mediums, both fixed in a further commit:
+- **TOCTOU symlink swap on transcript reads:** transcript bytes are now read
+  with `openat` + `O_NOFOLLOW` (store root → session dir → fixed file name,
+  via `rustix`, already in the dependency tree) from the session's own
+  directory, never from the absolute paths stored in `session.json`, and the
+  validated JSON bytes are the bytes returned. FIFOs and non-regular files
+  are refused without blocking.
+- **Capture outliving its recorder leader:** a capture is live while its
+  verified leader runs or any process in the recorder's group carries this
+  session's chunk output pattern (`pgrep -g` + command check, so a reused
+  group id never matches). Status, reclaim and stop use that check; stop
+  signals the group and waits until it is empty.
+
+A second, short confirming Codex re-review then covered that commit (see the
+PR body for its result).
+
 Every fix has a regression test that fails with the fix reverted (checked
 by reverting each fix locally): the concurrent-start test failed 3/3 without
 the lock; the config race test reported "a stale snapshot re-enabled start";
-the group test left the descendant in state `S`.
+the group test left the descendant in state `S`; the leader-exit test
+reported the session stale; the in-directory symlink test read
+`segments.jsonl` as the transcript.
 
 Gate after the round: `cargo fmt --check`, `cargo clippy --all-targets -- -D
-warnings`, `cargo test --all` three times (249 passed, 0 failed each run),
+warnings`, `cargo test --all` three times (0 failures; see the PR body for the final counts),
 `cargo run -- doctor` (exit 0), `cargo run -- privacy audit --format json`,
 `scripts/e2e/phase-10b-mcp.sh` and `scripts/e2e/phase-10a-meet-service.sh`
 all passed.
@@ -195,7 +215,6 @@ all passed.
 - Protocol `2024-11-05` is not accepted (older MCP Inspector / Desktop builds are offered `2025-11-25`).
 - With no sessions at all, `meeting_get_transcript` returns `meeting_no_active_session` ("no active meeting session"), which is worded for recording.
 - `meet export` (CLI) keeps trusting the export paths in `session.json`; only the MCP transcript reads are confined to the session directory.
-- A recorder whose group leader has already exited while descendants remain is not signalled (the leader identity can no longer be verified).
 - Concurrent `meeting_start` is tested at the service level (the MCP handlers call the same `start`), not with two in-flight MCP requests.
 - `resources/read` on a still-recording session (`-32600`) has no dedicated test.
 

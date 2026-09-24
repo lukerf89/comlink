@@ -552,29 +552,28 @@ pub fn stop_segmented_capture(
     identity: &SegmentedCaptureIdentity,
     timeout: Duration,
 ) -> Result<bool, ComlinkError> {
+    // From here on the process group is known to be the recorder's: its
+    // verified leader is alive, or processes recording this session's chunks
+    // are in it. A group id is never reused while any member lives, so the
+    // group stays the recorder's until it is empty.
     if !segmented_capture_is_running(identity) {
         return Ok(false);
     }
 
-    stop_process_with_signal(identity, "INT")?;
-    if wait_until_stopped(identity, timeout)? {
-        return Ok(true);
+    for (signal, wait) in [
+        ("INT", timeout),
+        ("TERM", Duration::from_secs(2)),
+        ("KILL", Duration::from_secs(1)),
+    ] {
+        stop_process_with_signal(identity, signal)?;
+        if wait_until_stopped(identity, wait)? {
+            return Ok(true);
+        }
     }
-
-    stop_process_with_signal(identity, "TERM")?;
-    if wait_until_stopped(identity, Duration::from_secs(2))? {
-        return Ok(true);
-    }
-
-    stop_process_with_signal(identity, "KILL")?;
-    if wait_until_stopped(identity, Duration::from_secs(1))? {
-        Ok(true)
-    } else {
-        Err(ComlinkError::AudioCaptureFailed(format!(
-            "recorder pid {} did not exit after SIGKILL",
-            identity.pid
-        )))
-    }
+    Err(ComlinkError::AudioCaptureFailed(format!(
+        "recorder pid {} did not exit after SIGKILL",
+        identity.pid
+    )))
 }
 
 /// A pid plus its OS-reported start time, so a recycled pid is never mistaken
@@ -619,7 +618,16 @@ pub fn process_identity_is_running(
     }
 }
 
+/// Whether the capture is still running: its verified leader (the recorder
+/// pid, checked by start time and command), or any process in the recorder's
+/// process group that is recording this session's chunks (its command line
+/// carries the chunk output pattern), for a leader that exited while a
+/// descendant kept capturing.
 pub fn segmented_capture_is_running(identity: &SegmentedCaptureIdentity) -> bool {
+    capture_leader_is_running(identity) || !capture_group_members(identity).is_empty()
+}
+
+fn capture_leader_is_running(identity: &SegmentedCaptureIdentity) -> bool {
     process_identity_is_running(
         &ProcessIdentity {
             pid: identity.pid,
@@ -627,6 +635,30 @@ pub fn segmented_capture_is_running(identity: &SegmentedCaptureIdentity) -> bool
         },
         Some(&identity.output_pattern),
     )
+}
+
+/// Pids in the recorder's process group (group id = recorder pid) whose
+/// command line carries this session's chunk output pattern. The pattern is
+/// unique to the session directory, so an unrelated group that later reuses
+/// the id never matches.
+fn capture_group_members(identity: &SegmentedCaptureIdentity) -> Vec<u32> {
+    if identity.pid == 0 {
+        return Vec::new();
+    }
+    let Ok(output) = system_command("/usr/bin/pgrep", "pgrep")
+        .args(["-g", &identity.pid.to_string()])
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.trim().parse::<u32>().ok())
+        .filter(|pid| {
+            process_command(*pid).is_some_and(|command| command.contains(&identity.output_pattern))
+        })
+        .collect()
 }
 
 pub fn process_is_running(pid: u32) -> bool {
@@ -694,18 +726,22 @@ fn stop_process_with_signal(
     identity: &SegmentedCaptureIdentity,
     signal: &str,
 ) -> Result<(), ComlinkError> {
-    let leader_running = segmented_capture_is_running(identity);
-    if !leader_running && !recorder_group_alive(identity.pid) {
-        return Ok(());
-    }
-
     if send_signal(signal, &format!("-{}", identity.pid))? {
         return Ok(());
     }
-    if !leader_running {
+    // No such group: a recorder started before recorders led their own
+    // group. Signal the verified leader and any verified capture process.
+    let mut targets = capture_group_members(identity);
+    if capture_leader_is_running(identity) && !targets.contains(&identity.pid) {
+        targets.push(identity.pid);
+    }
+    if targets.is_empty() {
         return Ok(());
     }
-    let status = send_signal(signal, &identity.pid.to_string())?;
+    let mut status = true;
+    for pid in targets {
+        status &= send_signal(signal, &pid.to_string())?;
+    }
 
     if status || !segmented_capture_is_running(identity) {
         Ok(())
@@ -737,14 +773,15 @@ fn recorder_group_alive(pgid: u32) -> bool {
     send_signal("0", &format!("-{pgid}")).unwrap_or(false)
 }
 
-/// Stopped means the leader is gone and so is every process in its group.
+/// Stopped means the capture is gone and so is every process in its group
+/// (only called by a stop that verified the group is the recorder's).
 fn wait_until_stopped(
     identity: &SegmentedCaptureIdentity,
     timeout: Duration,
 ) -> Result<bool, ComlinkError> {
     let started = Instant::now();
     loop {
-        if !segmented_capture_is_running(identity) && !recorder_group_alive(identity.pid) {
+        if !capture_leader_is_running(identity) && !recorder_group_alive(identity.pid) {
             return Ok(true);
         }
 

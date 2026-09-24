@@ -1,6 +1,6 @@
 use std::{
     fs::{self, File, OpenOptions, TryLockError},
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -22,6 +22,9 @@ const ACTIVE_SESSION_FILE: &str = "active-session";
 const SESSION_FILE: &str = "session.json";
 const LIFECYCLE_LOCK_FILE: &str = "lifecycle.lock";
 const START_LOCK_FILE: &str = "start.lock";
+/// Export file names inside a session directory.
+pub const JSON_EXPORT_FILE: &str = "transcript.json";
+pub const MARKDOWN_EXPORT_FILE: &str = "transcript.md";
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1114,8 +1117,8 @@ impl FileMeetingStore {
             chunks_dir: session_dir.join("chunks"),
             recorder_stderr_path: session_dir.join("capture.stderr"),
             segments_jsonl_path: session_dir.join("segments.jsonl"),
-            json_export_path: session_dir.join("transcript.json"),
-            markdown_export_path: session_dir.join("transcript.md"),
+            json_export_path: session_dir.join(JSON_EXPORT_FILE),
+            markdown_export_path: session_dir.join(MARKDOWN_EXPORT_FILE),
         }
     }
 
@@ -1479,18 +1482,71 @@ impl FileMeetingStore {
         session: &MeetingSessionState,
     ) -> Result<MeetingExport, ComlinkError> {
         let path = PathBuf::from(&session.json_export_path);
+        let bytes = fs::read(&path).map_err(|error| {
+            ComlinkError::MeetingExportUnavailable(PathBuf::from(format!(
+                "{} ({error})",
+                path.display()
+            )))
+        })?;
+        Self::validate_export_bytes(session, &path, &bytes)
+    }
+
+    /// Read `<root>/<id>/<name>` for a caller that sends the contents
+    /// elsewhere (the MCP server sends transcripts to the calling model).
+    /// Each component is opened relative to the one before it with
+    /// `O_NOFOLLOW` (`openat`), so neither a symlinked session directory nor
+    /// a symlinked file, including one swapped in concurrently, can redirect
+    /// the read outside the store. Only regular files are read; a FIFO or
+    /// device never blocks the caller (`O_NONBLOCK`).
+    pub fn read_session_file_nofollow(&self, id: &str, name: &str) -> std::io::Result<Vec<u8>> {
+        use rustix::fs::{openat, Mode, OFlags, CWD};
+        let plain =
+            |part: &str| !part.is_empty() && part != "." && part != ".." && !part.contains('/');
+        if !plain(id) || !plain(name) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a plain session file name",
+            ));
+        }
+        // The store root is trusted configuration (it may legitimately be
+        // reached through a symlink); everything below it is not.
+        let root = openat(
+            CWD,
+            &self.root,
+            OFlags::RDONLY | OFlags::CLOEXEC | OFlags::DIRECTORY,
+            Mode::empty(),
+        )?;
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let session = openat(&root, id, flags | OFlags::DIRECTORY, Mode::empty())?;
+        let file = openat(&session, name, flags | OFlags::NONBLOCK, Mode::empty())?;
+        let mut file = File::from(file);
+        if !file.metadata()?.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    /// Parse and check a JSON export read from `path` against its session:
+    /// schema version, session id, `stopped` status, artifact paths and
+    /// segment count.
+    pub fn validate_export_bytes(
+        session: &MeetingSessionState,
+        path: &Path,
+        bytes: &[u8],
+    ) -> Result<MeetingExport, ComlinkError> {
         let invalid = |reason: String| {
             ComlinkError::MeetingExportUnavailable(PathBuf::from(format!(
                 "{} ({reason})",
                 path.display()
             )))
         };
-        let bytes = match fs::read(&path) {
-            Ok(bytes) => bytes,
-            Err(error) => return Err(invalid(error.to_string())),
-        };
         let export: MeetingExport =
-            serde_json::from_slice(&bytes).map_err(|error| invalid(error.to_string()))?;
+            serde_json::from_slice(bytes).map_err(|error| invalid(error.to_string()))?;
         if export.schema_version != MEETING_SCHEMA_VERSION {
             return Err(invalid(format!(
                 "schema_version {} is not {MEETING_SCHEMA_VERSION}",

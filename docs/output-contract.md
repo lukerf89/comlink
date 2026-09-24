@@ -301,6 +301,11 @@ match, so a new error cannot ship without a code. Codes an agent will see:
 | `meeting_finalize_failed` | `meeting_get_transcript` on a `failed` session; the message includes the recorded error and `comlink meet finalize <id>` |
 | `meeting_export_unavailable` | the session is stopped but its JSON export is missing or invalid, or an export path in `session.json` resolves outside the session directory |
 | `meeting_session_unreadable` | a `session.json` exists but cannot be read or parsed; or (transcript reads) it names a different session, or the session directory is a symlink |
+
+Transcript reads (`meeting_get_transcript` and the transcript resources) read
+`transcript.json` / `transcript.md` from the session's own directory without
+following symlinks; an export that is a symlink or not a regular file is
+`meeting_export_unavailable`.
 | `meeting_lifecycle_busy` | another comlink process holds the session lock, or another meeting start did not finish within 10 s |
 | `meeting_finalize_launch_failed` | the detached finalizer could not be started (the session is `failed`) |
 | `mode_not_found`, `model_missing`, `model_path_missing`, `dependency_missing`, `dependency_path_missing`, `dependency_not_executable`, `audio_capture_failed`, `invalid_config_value` | `meeting_start` setup failures, same as `meet start` |

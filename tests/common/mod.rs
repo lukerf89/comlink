@@ -44,6 +44,11 @@ pub struct MockOptions {
     /// SIGINT as a background job) and writes its pid to
     /// `<harness root>/descendant.pid`, like a wrapper that does not `exec`.
     pub spawn_descendant: bool,
+    /// The mock recorder starts a child whose command line carries the chunk
+    /// output pattern (like a real ffmpeg under a wrapper), writes its pid to
+    /// `<harness root>/capture-descendant.pid`, and the recorder itself exits
+    /// half a second after start while that child keeps "capturing".
+    pub leader_exits_leaving_capture: bool,
 }
 
 impl Default for MockOptions {
@@ -54,6 +59,7 @@ impl Default for MockOptions {
             retain_audio: false,
             silent: false,
             spawn_descendant: false,
+            leader_exits_leaving_capture: false,
         }
     }
 }
@@ -92,6 +98,10 @@ if [ -n "{descendant}" ]; then
   sleep 300 &
   echo "$!" > "{descendant}"
 fi
+if [ -n "{capture_descendant}" ]; then
+  bash -c 'while true; do sleep 0.2; done' comlink-capture-descendant "$out" &
+  echo "$!" > "{capture_descendant}"
+fi
 chunks={chunks}
 mkdir -p "$(dirname "$out")"
 if [ "$chunks" -gt 0 ]; then
@@ -105,11 +115,20 @@ if [ "$chunks" -gt 0 ]; then
   done
 fi
 trap 'exit 0' INT TERM
+if [ -n "{capture_descendant}" ]; then
+  sleep 0.5
+  exit 0
+fi
 while true; do
   sleep 0.1
 done
 "#,
                 chunks = options.chunks,
+                capture_descendant = if options.leader_exits_leaving_capture {
+                    root.join("capture-descendant.pid").display().to_string()
+                } else {
+                    String::new()
+                },
                 descendant = if options.spawn_descendant {
                     root.join("descendant.pid").display().to_string()
                 } else {
