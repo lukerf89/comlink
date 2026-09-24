@@ -316,7 +316,10 @@ fn doctor_probe_mic_bounds_a_hanging_capture() {
     let elapsed = started.elapsed();
 
     assert_eq!(output.status.code(), Some(0));
-    assert!(elapsed < Duration::from_secs(8), "took {elapsed:?}");
+    // The mock capture hangs for 30s against the 5s probe deadline. Finishing
+    // well short of 30s proves the deadline fired; a tight bound here only
+    // measured scheduler latency and flaked under parallel test load.
+    assert!(elapsed < Duration::from_secs(15), "took {elapsed:?}");
     let report = stdout_json(&output);
     let microphone = check(&report, "microphone");
     assert_eq!(microphone["status"], "warn");

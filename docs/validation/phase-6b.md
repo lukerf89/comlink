@@ -100,6 +100,24 @@ Results (observed on macOS, worktree off `main` 97988d2):
   name becomes `Name (:N)`.
 - If resolution fails, the microphone check becomes `warn`, never a doctor
   failure.
+- When ffmpeg is missing, nothing can be resolved, but `doctor` still reports a
+  non-blank `COMLINK_RECORD_DEVICE` value (unresolved) instead of the `:0`
+  fallback.
+- The microphone detail names where the device came from: `(--device)`,
+  `(COMLINK_RECORD_DEVICE)`, the system default input, or the `:0` fallback.
+
+### Fix round (cross-review findings)
+
+- **Flaky reap test:** `ffmpeg_probe_times_out_kills_and_reaps_hanging_capture`
+  read a pid file that the mock wrote. Under load, the deadline kill could land
+  before the mock wrote it. The probe now reports the spawned child's pid from
+  `Child::id()` through a private `probe_observed` hook, so the reap assertion
+  no longer depends on how far the child got.
+- **Wall-clock bounds:** the hang tests asserted the probe finished within 1 to
+  3 s of its deadline, which measured scheduler latency and flaked under
+  parallel load (`doctor_probe_mic_bounds_a_hanging_capture` failed 1 in 10 full
+  runs). Each mock hangs for 30 s, so the tests now assert completion under
+  15 s. That still proves the deadline fired, with room for load.
 
 ### Record near-silent handling
 

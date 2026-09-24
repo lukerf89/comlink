@@ -1,4 +1,4 @@
-use std::{fs, path::Path};
+use std::{env, fs, path::Path};
 
 use serde::Serialize;
 
@@ -178,7 +178,12 @@ fn build_report_with(
         DependencyState::Found(path) => Some(path.as_path()),
         _ => None,
     };
-    checks.push(microphone_check(ffmpeg, options, probe));
+    checks.push(microphone_check(
+        ffmpeg,
+        env::var("COMLINK_RECORD_DEVICE").ok(),
+        options,
+        probe,
+    ));
 
     let ok = report_ok(&checks);
 
@@ -267,16 +272,28 @@ const MICROPHONE_REMEDIATION: &str = "grant Terminal microphone permission in ma
 
 fn microphone_check(
     ffmpeg: Option<&Path>,
+    env_device: Option<String>,
     options: DoctorOptions,
     probe: Option<&dyn MicProbe>,
 ) -> DoctorCheck {
     let resolved = match ffmpeg {
         Some(ffmpeg) => record::resolve_record_device(None, ffmpeg),
-        None => Ok(ResolvedRecordDevice {
-            avfoundation_input: record::DEFAULT_RECORD_DEVICE.to_string(),
-            name: None,
-            source: record::DeviceSource::Fallback,
-        }),
+        // Without ffmpeg nothing can be resolved against the AVFoundation
+        // list, but an explicit override is still what `record` would use.
+        None => Ok(
+            match record::select_record_device_request(None, env_device) {
+                Some((selector, source)) => ResolvedRecordDevice {
+                    avfoundation_input: selector,
+                    name: None,
+                    source,
+                },
+                None => ResolvedRecordDevice {
+                    avfoundation_input: record::DEFAULT_RECORD_DEVICE.to_string(),
+                    name: None,
+                    source: record::DeviceSource::Fallback,
+                },
+            },
+        ),
     };
     let device = match resolved {
         Ok(device) => device,
@@ -318,8 +335,9 @@ fn microphone_check(
 fn microphone_device_detail(device: &ResolvedRecordDevice) -> String {
     match device.source {
         record::DeviceSource::Flag | record::DeviceSource::Env => format!(
-            "record uses FFmpeg AVFoundation input device {} (COMLINK_RECORD_DEVICE)",
-            device.label()
+            "record uses FFmpeg AVFoundation input device {} ({})",
+            device.label(),
+            device.source.as_str()
         ),
         record::DeviceSource::SystemDefault => format!(
             "record defaults to the system default input device {}",
@@ -731,7 +749,7 @@ mod tests {
     fn microphone_check_never_probes_without_flag() {
         let fake = FakeProbe::new(ProbeOutcome::TimedOut);
 
-        let result = microphone_check(None, DoctorOptions { probe_mic: false }, Some(&fake));
+        let result = microphone_check(None, None, DoctorOptions { probe_mic: false }, Some(&fake));
 
         assert!(fake.calls.borrow().is_empty());
         assert_eq!(result.status, "info");
@@ -743,11 +761,79 @@ mod tests {
     fn microphone_check_probes_the_resolved_device_when_flagged() {
         let fake = FakeProbe::new(ProbeOutcome::Level(level(-120.0)));
 
-        let result = microphone_check(None, DoctorOptions { probe_mic: true }, Some(&fake));
+        let result = microphone_check(None, None, DoctorOptions { probe_mic: true }, Some(&fake));
 
         assert_eq!(fake.calls.borrow().as_slice(), [":0".to_string()]);
         assert_eq!(result.status, "warn");
         assert!(result.detail.contains("no signal from device :0"));
+    }
+
+    #[test]
+    fn microphone_check_without_ffmpeg_honors_env_override() {
+        let fake = FakeProbe::new(ProbeOutcome::TimedOut);
+
+        let result = microphone_check(
+            None,
+            Some(" :3 ".to_string()),
+            DoctorOptions { probe_mic: false },
+            Some(&fake),
+        );
+
+        assert_eq!(result.status, "info");
+        assert!(
+            result.detail.contains(":3 (COMLINK_RECORD_DEVICE)"),
+            "{}",
+            result.detail
+        );
+        assert!(!result.detail.contains("could not be resolved"));
+        assert!(!result.detail.contains(":0"), "{}", result.detail);
+    }
+
+    #[test]
+    fn microphone_check_without_ffmpeg_ignores_blank_env_override() {
+        let result = microphone_check(
+            None,
+            Some("   ".to_string()),
+            DoctorOptions { probe_mic: false },
+            None,
+        );
+
+        assert!(
+            result
+                .detail
+                .contains(":0 (system default input could not be resolved)"),
+            "{}",
+            result.detail
+        );
+    }
+
+    #[test]
+    fn microphone_device_detail_labels_each_source() {
+        let device = |source| ResolvedRecordDevice {
+            avfoundation_input: ":2".to_string(),
+            name: None,
+            source,
+        };
+        let cases = [
+            (record::DeviceSource::Flag, "(--device)"),
+            (record::DeviceSource::Env, "(COMLINK_RECORD_DEVICE)"),
+            (
+                record::DeviceSource::SystemDefault,
+                "system default input device",
+            ),
+            (
+                record::DeviceSource::Fallback,
+                "system default input could not be resolved",
+            ),
+        ];
+        for (source, needle) in cases {
+            let detail = microphone_device_detail(&device(source));
+            assert!(detail.contains(needle), "{source:?}: {detail}");
+        }
+        assert!(
+            !microphone_device_detail(&device(record::DeviceSource::Flag))
+                .contains("COMLINK_RECORD_DEVICE")
+        );
     }
 
     #[test]

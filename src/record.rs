@@ -202,6 +202,15 @@ impl FfmpegMicProbe {
 
 impl MicProbe for FfmpegMicProbe {
     fn probe(&self, device: &str) -> ProbeOutcome {
+        self.probe_observed(device, |_| {})
+    }
+}
+
+impl FfmpegMicProbe {
+    /// [`MicProbe::probe`], reporting the spawned ffmpeg child's pid to
+    /// `on_spawn` as soon as it exists (tests use it to prove the child is
+    /// reaped without depending on the child running any code first).
+    fn probe_observed(&self, device: &str, on_spawn: impl FnOnce(u32)) -> ProbeOutcome {
         // Dropped on every return path, which removes the probe WAV.
         let tempdir = match tempfile::tempdir() {
             Ok(dir) => dir,
@@ -242,7 +251,10 @@ impl MicProbe for FfmpegMicProbe {
             .stderr(Stdio::piped())
             .spawn()
         {
-            Ok(child) => child,
+            Ok(child) => {
+                on_spawn(child.id());
+                child
+            }
             Err(error) => {
                 return ProbeOutcome::CaptureFailed {
                     stderr_tail: format!("failed to start ffmpeg: {error}"),
@@ -803,27 +815,25 @@ mod tests {
     #[test]
     fn ffmpeg_probe_times_out_kills_and_reaps_hanging_capture() {
         let dir = tempfile::tempdir().unwrap();
-        let pid_file = dir.path().join("pid");
-        let ffmpeg = mock_ffmpeg(
-            dir.path(),
-            &format!("echo $$ > '{}'\nexec sleep 30", pid_file.display()),
-        );
+        let ffmpeg = mock_ffmpeg(dir.path(), "exec sleep 30");
         let probe = FfmpegMicProbe {
             ffmpeg,
             capture: Duration::from_millis(100),
             deadline: Duration::from_secs(2),
         };
 
+        // The pid comes from the spawn itself, not from the mock writing a
+        // pid file, so the assertion cannot race how far the child got
+        // before the deadline kill (the old pid-file read flaked under load).
+        let mut spawned_pid = None;
         let started = Instant::now();
-        let outcome = probe.probe(":0");
+        let outcome = probe.probe_observed(":0", |pid| spawned_pid = Some(pid));
 
         assert_eq!(outcome, ProbeOutcome::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(5));
-        let pid: u32 = std::fs::read_to_string(&pid_file)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        // The mock hangs for 30s: finishing well short of that proves the
+        // deadline fired, without betting on scheduler latency under load.
+        assert!(started.elapsed() < Duration::from_secs(15));
+        let pid = spawned_pid.expect("probe did not report a spawned child");
         // A zombie still answers `kill -0`; a reaped pid does not.
         assert!(!process_is_running(pid), "probe child {pid} was not reaped");
     }
@@ -838,7 +848,8 @@ mod tests {
 
         let started = Instant::now();
         assert_eq!(probe.probe(":0"), ProbeOutcome::TimedOut);
-        assert!(started.elapsed() < Duration::from_secs(6));
+        // 30s hang vs 5s deadline: well under 30s proves the bound held.
+        assert!(started.elapsed() < Duration::from_secs(15));
     }
 
     #[cfg(unix)]
