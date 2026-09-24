@@ -1,0 +1,4 @@
+Recording... press Enter to stop.
+warning: captured audio was near-silent (-120.0 dBFS avg); check that the intended input device is selected and not muted, and that microphone permission is granted (see `comlink doctor`); transcript may be unreliable
+hint: captured from input device :0; available AVFoundation audio devices: :0 BlackHole 2ch, :1 MacBook Pro Microphone; pick another with COMLINK_RECORD_DEVICE=":N" or `comlink record --device :N`; check that the mic is not muted and that your terminal has access in System Settings > Privacy & Security > Microphone
+Stop-to-final latency: 300 ms.

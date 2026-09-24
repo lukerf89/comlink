@@ -463,20 +463,95 @@ fn clean_spacing_preserving_newlines(raw_text: &str) -> String {
         .to_string()
 }
 
-fn apply_spoken_layout(text: &str) -> String {
-    let with_paragraphs = replace_phrase_case_insensitive(text, "new paragraph", "\n\n");
-    let with_lines = replace_phrase_case_insensitive(&with_paragraphs, "new line", "\n");
-    clean_spacing_preserving_newlines(&with_lines)
+/// Private-use sentinel for a dictated "new paragraph".
+const PARAGRAPH_SENTINEL: char = '\u{E000}';
+/// Private-use sentinel for a dictated "new line".
+const LINE_SENTINEL: char = '\u{E001}';
+
+fn is_layout_sentinel(ch: char) -> bool {
+    ch == PARAGRAPH_SENTINEL || ch == LINE_SENTINEL
 }
 
-fn replace_phrase_case_insensitive(text: &str, phrase: &str, replacement: &str) -> String {
-    apply_phrase_replacements(
-        text,
-        &[PhraseReplacement {
-            trigger: phrase,
-            replacement,
-        }],
-    )
+fn apply_spoken_layout(text: &str) -> String {
+    // Strip any pre-existing sentinels so input can never forge a directive.
+    let text = text
+        .chars()
+        .filter(|ch| !is_layout_sentinel(*ch))
+        .collect::<String>();
+    let paragraph = PARAGRAPH_SENTINEL.to_string();
+    let line = LINE_SENTINEL.to_string();
+    let marked = apply_phrase_replacements(
+        &text,
+        &[
+            PhraseReplacement {
+                trigger: "new paragraph",
+                replacement: &paragraph,
+            },
+            PhraseReplacement {
+                trigger: "new line",
+                replacement: &line,
+            },
+        ],
+    );
+    let absorbed = absorb_directive_punctuation(&marked);
+    let expanded = absorbed
+        .replace(PARAGRAPH_SENTINEL, "\n\n")
+        .replace(LINE_SENTINEL, "\n");
+    clean_spacing_preserving_newlines(&expanded)
+}
+
+/// Drop the ASR punctuation that clings to a spoken layout directive.
+///
+/// Before a sentinel: whitespace and separators (`, ; :`) are dropped, but a
+/// terminal `. ? !` is kept. After a sentinel: whitespace and `, ; : .` are
+/// dropped (e.g. "new line." artifacts) unless the punctuation leads into a
+/// word (so `.gitignore` survives); `? !` are kept. Adjacent sentinels collapse
+/// to the strongest one (paragraph beats line).
+fn absorb_directive_punctuation(text: &str) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut output: Vec<char> = Vec::with_capacity(chars.len());
+    let mut index = 0;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if !is_layout_sentinel(ch) {
+            output.push(ch);
+            index += 1;
+            continue;
+        }
+
+        while output
+            .last()
+            .is_some_and(|last| last.is_whitespace() || matches!(last, ',' | ';' | ':'))
+        {
+            output.pop();
+        }
+        match output.last().copied() {
+            Some(previous) if is_layout_sentinel(previous) => {
+                if ch == PARAGRAPH_SENTINEL {
+                    output.pop();
+                    output.push(PARAGRAPH_SENTINEL);
+                }
+            }
+            _ => output.push(ch),
+        }
+        index += 1;
+
+        while index < chars.len() {
+            let next = chars[index];
+            let droppable_punctuation = matches!(next, ',' | ';' | ':' | '.')
+                && !chars
+                    .get(index + 1)
+                    .is_some_and(|after| after.is_alphanumeric());
+            if next.is_whitespace() || droppable_punctuation {
+                index += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    output.into_iter().collect()
 }
 
 fn apply_vocabulary(text: &str, entries: &[VocabularyEntry]) -> String {
@@ -724,6 +799,69 @@ mod tests {
                 TextRules::default()
             ),
             "thanks for sending this\n\nI can review today."
+        );
+    }
+
+    #[test]
+    fn editor_directive_absorbs_surrounding_separator_punctuation() {
+        let editor = |text: &str| TextMode::Editor.process(text, TextRules::default());
+        assert_eq!(
+            editor("first line, new line, second line."),
+            "first line\nsecond line."
+        );
+        assert_eq!(editor("a; new line: b"), "a\nb.");
+        assert_eq!(editor("a new line. b"), "a\nb.");
+        assert_eq!(editor("a, new paragraph, b"), "a\n\nb.");
+        assert_eq!(editor("Sentence. new paragraph Next"), "Sentence.\n\nNext.");
+        assert_eq!(editor("Really? new line yes"), "Really?\nyes.");
+        assert_eq!(editor("a new line ! b"), "a\n! b.");
+    }
+
+    #[test]
+    fn editor_directives_are_case_insensitive_and_word_bounded() {
+        let editor = |text: &str| TextMode::Editor.process(text, TextRules::default());
+        assert_eq!(editor("one New Line two"), "one\ntwo.");
+        assert_eq!(editor("one NEW PARAGRAPH two"), "one\n\ntwo.");
+        assert_eq!(
+            editor("use a newline character"),
+            "use a newline character."
+        );
+        assert_eq!(editor("we renew line items"), "we renew line items.");
+    }
+
+    #[test]
+    fn repeated_directives_collapse_to_the_strongest() {
+        let editor = |text: &str| TextMode::Editor.process(text, TextRules::default());
+        assert_eq!(editor("a new line new line b"), "a\nb.");
+        assert_eq!(editor("a new line, new paragraph, b"), "a\n\nb.");
+        assert_eq!(editor("a new paragraph new line b"), "a\n\nb.");
+    }
+
+    #[test]
+    fn directive_keeps_dotted_tokens_after_it() {
+        assert_eq!(
+            TextMode::Editor.process("edit new line .gitignore now", TextRules::default()),
+            "edit\n.gitignore now."
+        );
+    }
+
+    #[test]
+    fn pre_existing_sentinel_characters_are_stripped() {
+        assert_eq!(
+            TextMode::Editor.process("a\u{E000}b\u{E001}c", TextRules::default()),
+            "abc."
+        );
+    }
+
+    #[test]
+    fn outlook_and_terminal_directives_absorb_punctuation() {
+        assert_eq!(
+            TextMode::Outlook.process("thanks, new paragraph, I can review.", TextRules::default()),
+            "thanks\n\nI can review."
+        );
+        assert_eq!(
+            TextMode::Terminal.process("cargo test, new line, git status.", TextRules::default()),
+            "cargo test && git status"
         );
     }
 

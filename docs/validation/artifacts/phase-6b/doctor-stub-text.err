@@ -1,0 +1,15 @@
+Comlink doctor
+  offline core: enabled
+  [ok]   ffmpeg: <tmp>/mock-ffmpeg (set COMLINK_FFMPEG or install ffmpeg)
+  [ok]   ffprobe: <tmp>/mock-ffprobe (optional but recommended; set COMLINK_FFPROBE or install ffprobe)
+  [ok]   asr: <tmp>/mock-whisper (set COMLINK_WHISPER_CPP to whisper-cli or install whisper.cpp)
+  [warn] model-path: <tmp>/ggml-stub.bin (run `comlink models select <name> --path <real ggml model>`)
+         Selected model looks like a test stub / not a real model (1024 bytes): 1024 bytes is below the 10000000 byte minimum for a real ggml model. Transcription will produce garbage or nothing.
+  [ok]   clipboard-copy: <tmp>/mock-pbcopy (install macOS pbcopy support or set COMLINK_PBCOPY to an executable test adapter)
+  [ok]   clipboard-read: <tmp>/mock-pbpaste (optional; install macOS pbpaste support or set COMLINK_PBPASTE)
+  [ok]   data-path: <tmp>/comlink-data (set COMLINK_DATA_DIR to a writable directory)
+  [ok]   system-audio: BlackHole 2ch (Route meeting output through a Multi-Output or Aggregate Device that includes BlackHole, then capture the BlackHole input alongside the microphone in a future phase.)
+  [info] microphone: grant Terminal microphone permission in macOS Privacy & Security; override with COMLINK_RECORD_DEVICE or record --device; run `comlink doctor --probe-mic` to test for signal
+  data_dir: <tmp>/comlink-data
+  system_audio_permissions: microphone=manual-check; routing=device-visible
+  privacy: local-first; ASR runs through local whisper.cpp; LLM rewrite is opt-in

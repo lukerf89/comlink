@@ -1,0 +1,36 @@
+{
+  "schema_version": "comlink.session.v1",
+  "session_id": "s1790222752676123000-78376-0",
+  "text": "you you you",
+  "raw_text": "you you you",
+  "final_text": "you you you",
+  "mode": "raw",
+  "copied": false,
+  "engine": "whisper.cpp",
+  "model": "<tmp>/ggml-base.bin",
+  "duration_ms": 2000,
+  "segments": [
+    {
+      "start_ms": 0,
+      "end_ms": 2000,
+      "text": "you you you"
+    }
+  ],
+  "source": {
+    "path": "microphone",
+    "normalized_sample_rate_hz": 16000,
+    "normalized_channels": 1
+  },
+  "context": {
+    "policy": "none",
+    "items": []
+  },
+  "processing_steps": [
+    {
+      "name": "raw"
+    }
+  ],
+  "warnings": [
+    "captured audio was near-silent (-120.0 dBFS avg); check that the intended input device is selected and not muted, and that microphone permission is granted (see `comlink doctor`); transcript may be unreliable"
+  ]
+}

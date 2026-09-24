@@ -114,7 +114,7 @@ cat "$COMLINK_MOCK_CLIPBOARD"
 SH
 chmod +x "$mock_pbpaste"
 
-printf 'mock model\n' > "$mock_model"
+python3 -c 'import sys; open(sys.argv[1], "wb").truncate(16 << 20)' "$mock_model"
 printf 'previous clipboard\n' > "$clipboard_file"
 
 echo "binary: cargo run --"

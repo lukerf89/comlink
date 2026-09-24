@@ -1,0 +1,11 @@
+{
+  "raw_text": "thanks, new paragraph, I can review.",
+  "final_text": "thanks\n\nI can review.",
+  "mode": "outlook",
+  "processing_steps": [
+    "deterministic-cleanup",
+    "vocabulary",
+    "snippets",
+    "outlook-formatting-preset"
+  ]
+}

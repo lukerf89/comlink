@@ -1,8 +1,10 @@
 use std::{
+    env,
     fs::File,
-    io::{self, ErrorKind, Write},
+    io::{self, ErrorKind, Read, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -10,9 +12,335 @@ use std::{
 use serde::{Deserialize, Serialize};
 use tempfile::TempDir;
 
-use crate::{audio, error::ComlinkError};
+use crate::{
+    audio::{self, AudioLevel},
+    error::ComlinkError,
+    system_audio,
+};
 
 const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Hardcoded AVFoundation selector used when neither an explicit device nor the
+/// system default input can be resolved.
+pub const DEFAULT_RECORD_DEVICE: &str = ":0";
+
+/// Where the microphone capture device selector came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceSource {
+    /// `--device` on the command line.
+    Flag,
+    /// `COMLINK_RECORD_DEVICE`.
+    Env,
+    /// The CoreAudio system default input, mapped through the AVFoundation list.
+    SystemDefault,
+    /// The hardcoded `:0` fallback.
+    Fallback,
+}
+
+impl DeviceSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flag => "--device",
+            Self::Env => "COMLINK_RECORD_DEVICE",
+            Self::SystemDefault => "system default input",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
+/// A microphone capture device resolved with the same precedence `record` and
+/// `meet start` use, so `doctor` reports exactly what capture will open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRecordDevice {
+    /// Value passed to ffmpeg's AVFoundation `-i` (e.g. `:1`).
+    pub avfoundation_input: String,
+    /// Canonical device name when known.
+    pub name: Option<String>,
+    pub source: DeviceSource,
+}
+
+impl ResolvedRecordDevice {
+    /// Human label: `Name (:N)` when the name is known, otherwise the selector.
+    pub fn label(&self) -> String {
+        match &self.name {
+            Some(name) => format!("{name} ({})", self.avfoundation_input),
+            None => self.avfoundation_input.clone(),
+        }
+    }
+}
+
+/// Pure precedence for an explicitly requested device: `--device` wins over
+/// `COMLINK_RECORD_DEVICE`; blank values are ignored.
+pub fn select_record_device_request(
+    flag: Option<String>,
+    env_value: Option<String>,
+) -> Option<(String, DeviceSource)> {
+    let normalize = |value: String| {
+        let trimmed = value.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    };
+    flag.and_then(normalize)
+        .map(|value| (value, DeviceSource::Flag))
+        .or_else(|| {
+            env_value
+                .and_then(normalize)
+                .map(|value| (value, DeviceSource::Env))
+        })
+}
+
+/// Resolve the microphone capture device for `record`, `meet start`, and
+/// `doctor`.
+///
+/// Precedence: an explicit `--device`, then `COMLINK_RECORD_DEVICE`, then the
+/// system (CoreAudio) default input device, then the hardcoded `:0` fallback.
+/// Named selectors are mapped to their current AVFoundation index; numeric
+/// selectors pass through. Prints nothing; callers own messaging.
+pub fn resolve_record_device(
+    requested: Option<String>,
+    ffmpeg: &Path,
+) -> Result<ResolvedRecordDevice, ComlinkError> {
+    if let Some((selector, source)) =
+        select_record_device_request(requested, env::var("COMLINK_RECORD_DEVICE").ok())
+    {
+        let matched = system_audio::resolve_capture_device(&selector, ffmpeg)
+            .map_err(ComlinkError::AudioCaptureFailed)?;
+        return Ok(ResolvedRecordDevice {
+            avfoundation_input: matched.avfoundation_input,
+            name: matched.name,
+            source,
+        });
+    }
+
+    if let Some(matched) = system_audio::resolve_default_input_device(ffmpeg) {
+        return Ok(ResolvedRecordDevice {
+            avfoundation_input: matched.avfoundation_input,
+            name: matched.name,
+            source: DeviceSource::SystemDefault,
+        });
+    }
+
+    Ok(ResolvedRecordDevice {
+        avfoundation_input: DEFAULT_RECORD_DEVICE.to_string(),
+        name: None,
+        source: DeviceSource::Fallback,
+    })
+}
+
+/// Best-effort remediation hint for a near-silent capture on `device`. Lists
+/// AVFoundation devices when ffmpeg can enumerate them.
+pub fn near_silent_hint(device: &ResolvedRecordDevice, ffmpeg: &Path) -> String {
+    let available = system_audio::list_avfoundation_audio_devices(ffmpeg).ok();
+    audio::near_silent_device_hint(audio::DeviceHintContext {
+        selector: &device.avfoundation_input,
+        name: device.name.as_deref(),
+        available: available.as_deref(),
+    })
+}
+
+/// Pure: return the level only when it is near-silent. `None` (unmeasurable)
+/// never flags, so an unreadable WAV keeps legacy behavior.
+pub fn diagnose_record_level(level: Option<AudioLevel>) -> Option<AudioLevel> {
+    level.filter(AudioLevel::is_near_silent)
+}
+
+/// Pure: an empty transcript from near-silent audio is almost always a device
+/// or permission problem, so say so. Every other error passes through.
+pub fn map_empty_transcript(
+    error: ComlinkError,
+    near_silent: Option<AudioLevel>,
+    device: &str,
+) -> ComlinkError {
+    match (error, near_silent) {
+        (ComlinkError::EmptyTranscript, Some(level)) => ComlinkError::NoSpeechNearSilent {
+            mean_dbfs: level.mean_dbfs,
+            device: device.to_string(),
+        },
+        (error, _) => error,
+    }
+}
+
+/// Result of a short live microphone probe.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProbeOutcome {
+    /// Capture succeeded and the WAV was measured.
+    Level(AudioLevel),
+    /// ffmpeg failed (non-zero exit, spawn failure, or no output file).
+    CaptureFailed { stderr_tail: String },
+    /// ffmpeg did not finish before the deadline; it was killed and reaped.
+    TimedOut,
+    /// Capture produced a file that could not be measured as 16-bit PCM.
+    Unmeasurable,
+}
+
+/// Adapter seam for the `doctor --probe-mic` live capture so the doctor can be
+/// tested with fakes and never touches AVFoundation unless asked.
+pub trait MicProbe {
+    fn probe(&self, device: &str) -> ProbeOutcome;
+}
+
+/// Maximum bytes of ffmpeg stderr kept for a probe diagnostic.
+pub const PROBE_STDERR_CAP_BYTES: usize = 4 * 1024;
+
+/// Real probe: captures a short WAV with ffmpeg AVFoundation into a temp dir,
+/// bounded by a hard deadline (kill + reap), then measures its level.
+#[derive(Debug, Clone)]
+pub struct FfmpegMicProbe {
+    pub ffmpeg: PathBuf,
+    pub capture: Duration,
+    pub deadline: Duration,
+}
+
+impl FfmpegMicProbe {
+    pub fn new(ffmpeg: PathBuf) -> Self {
+        Self {
+            ffmpeg,
+            capture: Duration::from_millis(1500),
+            deadline: Duration::from_secs(5),
+        }
+    }
+}
+
+impl MicProbe for FfmpegMicProbe {
+    fn probe(&self, device: &str) -> ProbeOutcome {
+        // Dropped on every return path, which removes the probe WAV.
+        let tempdir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                return ProbeOutcome::CaptureFailed {
+                    stderr_tail: format!("could not create probe temp dir: {error}"),
+                }
+            }
+        };
+        let wav_path = tempdir.path().join("probe.wav");
+        let seconds = format!("{:.3}", self.capture.as_secs_f64());
+
+        let mut child = match Command::new(&self.ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "avfoundation",
+                "-i",
+            ])
+            .arg(device)
+            .args(["-t", &seconds])
+            .args([
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-acodec",
+                "pcm_s16le",
+                "-f",
+                "wav",
+            ])
+            .arg(&wav_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                return ProbeOutcome::CaptureFailed {
+                    stderr_tail: format!("failed to start ffmpeg: {error}"),
+                }
+            }
+        };
+
+        let (sender, receiver) = mpsc::channel();
+        let reader = child.stderr.take().map(|mut stderr| {
+            thread::spawn(move || {
+                let tail = read_capped_tail(&mut stderr, PROBE_STDERR_CAP_BYTES);
+                let _ = sender.send(tail);
+            })
+        });
+
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {}
+                Err(_) => break None,
+            }
+            if started.elapsed() >= self.deadline {
+                break None;
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+
+        let timed_out = status.is_none();
+        let status = match status {
+            Some(status) => Some(status),
+            None => {
+                // Kill then reap so the probe never leaves a zombie behind.
+                let _ = child.kill();
+                child.wait().ok()
+            }
+        };
+
+        // Grandchildren may keep the stderr pipe open after a kill; never block
+        // on them. Join only once the reader has reported.
+        let stderr_tail = match receiver.recv_timeout(Duration::from_millis(250)) {
+            Ok(tail) => {
+                if let Some(handle) = reader {
+                    let _ = handle.join();
+                }
+                tail
+            }
+            Err(_) => String::new(),
+        };
+
+        if timed_out {
+            return ProbeOutcome::TimedOut;
+        }
+        let Some(status) = status else {
+            return ProbeOutcome::CaptureFailed { stderr_tail };
+        };
+        if !status.success() {
+            let stderr_tail = if stderr_tail.is_empty() {
+                format!("ffmpeg exited with {status}")
+            } else {
+                stderr_tail
+            };
+            return ProbeOutcome::CaptureFailed { stderr_tail };
+        }
+        if !wav_path.is_file() {
+            return ProbeOutcome::CaptureFailed {
+                stderr_tail: "ffmpeg produced no probe audio file".to_string(),
+            };
+        }
+
+        match audio::read_wav_level_samples(&wav_path)
+            .and_then(|samples| audio::session_audio_level([samples]))
+        {
+            Some(level) => ProbeOutcome::Level(level),
+            None => ProbeOutcome::Unmeasurable,
+        }
+    }
+}
+
+/// Drain `reader` to EOF, keeping only the last `cap` bytes (lossy UTF-8,
+/// trimmed). Keeps reading so the child never blocks on a full pipe.
+fn read_capped_tail(reader: &mut impl Read, cap: usize) -> String {
+    let mut kept: Vec<u8> = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                kept.extend_from_slice(&buffer[..read]);
+                if kept.len() > cap {
+                    let excess = kept.len() - cap;
+                    kept.drain(..excess);
+                }
+            }
+        }
+    }
+    String::from_utf8_lossy(&kept).trim().to_string()
+}
 
 #[derive(Debug)]
 pub struct RecordingOptions<'a> {
@@ -372,6 +700,222 @@ mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    #[test]
+    fn device_request_precedence_prefers_flag_then_env_and_ignores_blank() {
+        assert_eq!(
+            select_record_device_request(Some(":2".into()), Some(":1".into())),
+            Some((":2".to_string(), DeviceSource::Flag))
+        );
+        assert_eq!(
+            select_record_device_request(None, Some(" Studio Mic ".into())),
+            Some(("Studio Mic".to_string(), DeviceSource::Env))
+        );
+        assert_eq!(
+            select_record_device_request(Some("  ".into()), Some(":1".into())),
+            Some((":1".to_string(), DeviceSource::Env))
+        );
+        assert_eq!(
+            select_record_device_request(None, Some(String::new())),
+            None
+        );
+        assert_eq!(select_record_device_request(None, None), None);
+    }
+
+    fn silent_level() -> AudioLevel {
+        AudioLevel {
+            mean_dbfs: -120.0,
+            peak_dbfs: -120.0,
+        }
+    }
+
+    fn speech_level() -> AudioLevel {
+        AudioLevel {
+            mean_dbfs: -25.0,
+            peak_dbfs: -3.0,
+        }
+    }
+
+    #[test]
+    fn diagnose_record_level_flags_only_near_silent_measurements() {
+        assert_eq!(
+            diagnose_record_level(Some(silent_level())),
+            Some(silent_level())
+        );
+        assert_eq!(diagnose_record_level(Some(speech_level())), None);
+        assert_eq!(diagnose_record_level(None), None);
+    }
+
+    #[test]
+    fn map_empty_transcript_upgrades_only_near_silent_empty_transcripts() {
+        let mapped =
+            map_empty_transcript(ComlinkError::EmptyTranscript, Some(silent_level()), ":0");
+        match &mapped {
+            ComlinkError::NoSpeechNearSilent { mean_dbfs, device } => {
+                assert_eq!(*mean_dbfs, -120.0);
+                assert_eq!(device, ":0");
+            }
+            other => panic!("expected NoSpeechNearSilent, got {other:?}"),
+        }
+        assert_eq!(mapped.exit_code(), 4);
+
+        assert!(matches!(
+            map_empty_transcript(ComlinkError::EmptyTranscript, None, ":0"),
+            ComlinkError::EmptyTranscript
+        ));
+        assert!(matches!(
+            map_empty_transcript(
+                ComlinkError::WhisperFailed("boom".into()),
+                Some(silent_level()),
+                ":0"
+            ),
+            ComlinkError::WhisperFailed(_)
+        ));
+    }
+
+    #[test]
+    fn capped_tail_keeps_only_last_bytes() {
+        let data = format!("{}END", "x".repeat(10_000));
+        let tail = read_capped_tail(&mut data.as_bytes(), 16);
+        assert_eq!(tail.len(), 16);
+        assert!(tail.ends_with("END"));
+    }
+
+    #[cfg(unix)]
+    fn mock_ffmpeg(dir: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("mock-ffmpeg");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn fixture(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/audio")
+            .join(name)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_probe_times_out_kills_and_reaps_hanging_capture() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let ffmpeg = mock_ffmpeg(
+            dir.path(),
+            &format!("echo $$ > '{}'\nexec sleep 30", pid_file.display()),
+        );
+        let probe = FfmpegMicProbe {
+            ffmpeg,
+            capture: Duration::from_millis(100),
+            deadline: Duration::from_secs(2),
+        };
+
+        let started = Instant::now();
+        let outcome = probe.probe(":0");
+
+        assert_eq!(outcome, ProbeOutcome::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let pid: u32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // A zombie still answers `kill -0`; a reaped pid does not.
+        assert!(!process_is_running(pid), "probe child {pid} was not reaped");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_probe_default_deadline_bounds_a_hang_with_orphaned_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        // Non-exec sleep: the orphaned grandchild keeps the stderr pipe open.
+        let ffmpeg = mock_ffmpeg(dir.path(), "sleep 30");
+        let probe = FfmpegMicProbe::new(ffmpeg);
+
+        let started = Instant::now();
+        assert_eq!(probe.probe(":0"), ProbeOutcome::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(6));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_probe_reports_capture_failure_with_stderr_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = mock_ffmpeg(
+            dir.path(),
+            "echo 'Input/output error: device :7 not found' >&2\nexit 3",
+        );
+        let outcome = FfmpegMicProbe::new(ffmpeg).probe(":7");
+        match outcome {
+            ProbeOutcome::CaptureFailed { stderr_tail } => {
+                assert!(stderr_tail.contains("device :7 not found"), "{stderr_tail}")
+            }
+            other => panic!("expected CaptureFailed, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn copy_fixture_ffmpeg(dir: &Path, fixture_name: &str) -> PathBuf {
+        // Copies the fixture to the last argument (the output WAV path).
+        mock_ffmpeg(
+            dir,
+            &format!(
+                "for last; do :; done\ncp '{}' \"$last\"",
+                fixture(fixture_name).display()
+            ),
+        )
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_probe_measures_silence_as_near_silent_and_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let out_log = dir.path().join("out-path");
+        let ffmpeg = mock_ffmpeg(
+            dir.path(),
+            &format!(
+                "for last; do :; done\nprintf '%s' \"$last\" > '{}'\ncp '{}' \"$last\"",
+                out_log.display(),
+                fixture("silence.wav").display()
+            ),
+        );
+        match FfmpegMicProbe::new(ffmpeg).probe(":0") {
+            ProbeOutcome::Level(level) => assert!(level.is_near_silent(), "{level:?}"),
+            other => panic!("expected Level, got {other:?}"),
+        }
+        let probe_wav = PathBuf::from(std::fs::read_to_string(&out_log).unwrap());
+        assert!(probe_wav.ends_with("probe.wav"));
+        assert!(!probe_wav.exists(), "probe WAV was not cleaned up");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_probe_measures_signal_as_audible() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = copy_fixture_ffmpeg(dir.path(), "short.wav");
+        match FfmpegMicProbe::new(ffmpeg).probe(":0") {
+            ProbeOutcome::Level(level) => assert!(!level.is_near_silent(), "{level:?}"),
+            other => panic!("expected Level, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ffmpeg_probe_reports_unmeasurable_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let ffmpeg = mock_ffmpeg(
+            dir.path(),
+            "for last; do :; done\nprintf 'not a wav' > \"$last\"",
+        );
+        assert_eq!(
+            FfmpegMicProbe::new(ffmpeg).probe(":0"),
+            ProbeOutcome::Unmeasurable
+        );
+    }
 
     #[cfg(unix)]
     #[test]
