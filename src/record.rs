@@ -684,23 +684,30 @@ fn stop_recorder(child: &mut Child) -> Result<(), ComlinkError> {
     }
 }
 
+/// Signal the recorder's whole process group (recorders are started as group
+/// leaders, so the group id is the recorded pid) so a wrapper's descendants
+/// stop with it; fall back to the pid alone for a recorder that is not a
+/// group leader (sessions started before recorders had their own group).
+/// Only called after the leader was verified by identity, so the group is the
+/// one the recorder created.
 fn stop_process_with_signal(
     identity: &SegmentedCaptureIdentity,
     signal: &str,
 ) -> Result<(), ComlinkError> {
-    if !segmented_capture_is_running(identity) {
+    let leader_running = segmented_capture_is_running(identity);
+    if !leader_running && !recorder_group_alive(identity.pid) {
         return Ok(());
     }
 
-    let status = system_command("/bin/kill", "kill")
-        .arg(format!("-{signal}"))
-        .arg(identity.pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| ComlinkError::AudioCaptureFailed(error.to_string()))?;
+    if send_signal(signal, &format!("-{}", identity.pid))? {
+        return Ok(());
+    }
+    if !leader_running {
+        return Ok(());
+    }
+    let status = send_signal(signal, &identity.pid.to_string())?;
 
-    if status.success() || !segmented_capture_is_running(identity) {
+    if status || !segmented_capture_is_running(identity) {
         Ok(())
     } else {
         Err(ComlinkError::AudioCaptureFailed(format!(
@@ -710,13 +717,34 @@ fn stop_process_with_signal(
     }
 }
 
+/// `kill -<signal> -- <target>`; `target` is a pid, or `-<pgid>` for a
+/// process group. Returns whether the signal was delivered.
+fn send_signal(signal: &str, target: &str) -> Result<bool, ComlinkError> {
+    system_command("/bin/kill", "kill")
+        .arg(format!("-{signal}"))
+        .arg("--")
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .map_err(|error| ComlinkError::AudioCaptureFailed(error.to_string()))
+}
+
+/// Whether any process is left in the recorder's process group (`kill -0` to
+/// the group). False when the recorder never led a group.
+fn recorder_group_alive(pgid: u32) -> bool {
+    send_signal("0", &format!("-{pgid}")).unwrap_or(false)
+}
+
+/// Stopped means the leader is gone and so is every process in its group.
 fn wait_until_stopped(
     identity: &SegmentedCaptureIdentity,
     timeout: Duration,
 ) -> Result<bool, ComlinkError> {
     let started = Instant::now();
     loop {
-        if !segmented_capture_is_running(identity) {
+        if !segmented_capture_is_running(identity) && !recorder_group_alive(identity.pid) {
             return Ok(true);
         }
 

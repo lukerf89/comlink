@@ -1887,6 +1887,96 @@ fn transcript_errors_for_none_unknown_and_missing_or_invalid_json_export() {
 }
 
 #[test]
+fn stop_signals_the_whole_recorder_process_group() {
+    for detached in [false, true] {
+        let harness = ServiceHarness::new(MockOptions {
+            spawn_descendant: true,
+            ..MockOptions::default()
+        });
+        let ctx = harness.ctx(Arc::new(NoopLauncher));
+        let started = harness.start(&ctx, 2);
+        let pid_file = harness.root.join("descendant.pid");
+        let descendant: u32 = loop {
+            if let Some(pid) = fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|text| text.trim().parse().ok())
+            {
+                break pid;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        // The descendant is in the recorder's group, not the test's.
+        let pgid = std::process::Command::new("ps")
+            .args(["-o", "pgid=", "-p", &descendant.to_string()])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&pgid.stdout).trim(),
+            started.recorder_pid.to_string()
+        );
+
+        if detached {
+            meet_service::stop_detached(&ctx, None, STOP_WAIT).unwrap();
+        } else {
+            meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+        }
+        // Stopping the meeting stops everything the recorder started.
+        common::assert_reaped(descendant, Duration::from_secs(5));
+    }
+}
+
+#[test]
+fn concurrent_starts_record_exactly_one_meeting() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let barrier = Arc::new(std::sync::Barrier::new(4));
+    let results: Vec<_> = (0..4)
+        .map(|_| harness.ctx(Arc::new(NoopLauncher)))
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|ctx| {
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                meet_service::start(
+                    &ctx,
+                    meet_service::StartRequest {
+                        mode: "raw".to_string(),
+                        device: ":0".to_string(),
+                        source: meet::MeetSourceMode::MicOnly,
+                        system_device: None,
+                        chunk_seconds: 30,
+                        no_llm: true,
+                    },
+                )
+            })
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|handle| handle.join().unwrap())
+        .collect();
+
+    let started: Vec<_> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+    assert_eq!(started.len(), 1, "exactly one start wins: {results:?}");
+    let winner = &started[0].session_id;
+    for error in results.iter().filter_map(|r| r.as_ref().err()) {
+        assert!(
+            matches!(error, ComlinkError::MeetingAlreadyActive(id) if id == winner),
+            "{error}"
+        );
+    }
+    // Only one session exists and it is the active one.
+    let store = harness.store();
+    assert_eq!(store.list_sessions().unwrap().0.len(), 1);
+    assert_eq!(
+        store.active_session_id().unwrap().as_deref(),
+        Some(winner.as_str())
+    );
+    common::wait_for_chunks(Path::new(&started[0].chunks_dir), 2);
+    meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+}
+
+#[test]
 fn transcript_names_a_corrupt_session_and_never_reports_an_unknown_failure() {
     let harness = ServiceHarness::new(MockOptions::default());
     let ctx = harness.ctx(Arc::new(NoopLauncher));
@@ -1924,6 +2014,61 @@ fn transcript_names_a_corrupt_session_and_never_reports_an_unknown_failure() {
         other => panic!("expected MeetingSessionUnreadable, got {other:?}"),
     }
     assert_eq!(error.error_code(), "meeting_session_unreadable");
+}
+
+#[test]
+fn transcript_only_reads_files_inside_the_requested_session_directory() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let store = harness.store();
+    let outside = harness.root.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    let secret = outside.join("secret.md");
+    fs::write(&secret, "not a transcript").unwrap();
+
+    // Tampered absolute export path in session.json.
+    let id = stopped_meeting(&harness);
+    let mut session = store.read_session(&id).unwrap();
+    session.markdown_export_path = secret.display().to_string();
+    store.save_session(&session).unwrap();
+    let error = meet_service::transcript(&ctx, Some(id.clone()), md()).unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingExportUnavailable(ref path) if path.display().to_string().contains("outside the session directory")),
+        "{error}"
+    );
+
+    // A session directory that is a symlink out of the store.
+    let other = stopped_meeting(&harness);
+    let real_dir = outside.join("moved");
+    fs::rename(store.root().join(&other), &real_dir).unwrap();
+    std::os::unix::fs::symlink(&real_dir, store.root().join(&other)).unwrap();
+    let error = meet_service::transcript(&ctx, Some(other.clone()), md()).unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingSessionUnreadable { ref reason, .. } if reason.contains("symlink")),
+        "{error}"
+    );
+
+    // A session.json copied under another id.
+    let third = stopped_meeting(&harness);
+    let alias = "meeting-alias";
+    fs::create_dir_all(store.root().join(alias)).unwrap();
+    fs::copy(
+        store.root().join(&third).join("session.json"),
+        store.root().join(alias).join("session.json"),
+    )
+    .unwrap();
+    let error = meet_service::transcript(&ctx, Some(alias.to_string()), md()).unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingSessionUnreadable { ref reason, .. } if reason.contains("names session")),
+        "{error}"
+    );
+    // The untouched session still reads.
+    assert_eq!(
+        meet_service::transcript(&ctx, Some(third.clone()), md())
+            .unwrap()
+            .session_id,
+        third
+    );
 }
 
 #[test]

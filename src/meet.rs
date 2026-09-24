@@ -21,6 +21,7 @@ pub const MEETING_SCHEMA_VERSION: &str = "comlink.meeting.v1";
 const ACTIVE_SESSION_FILE: &str = "active-session";
 const SESSION_FILE: &str = "session.json";
 const LIFECYCLE_LOCK_FILE: &str = "lifecycle.lock";
+const START_LOCK_FILE: &str = "start.lock";
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1236,6 +1237,35 @@ impl FileMeetingStore {
     /// Take the per-session lifecycle lock (an OS advisory `flock` on
     /// `<session_dir>/lifecycle.lock`). The kernel releases it when the holder
     /// exits for any reason, so a crashed holder never leaves a stale lock.
+    /// Store-wide exclusive lock (`<root>/start.lock`) serializing meeting
+    /// starts across processes: the active-session check, any reclaim, session
+    /// creation, recorder startup and the active-pointer write happen as one
+    /// step, so two concurrent starts (CLI or MCP) can never both record.
+    pub fn lock_start(&self, wait: Duration) -> Result<SessionLock, ComlinkError> {
+        fs::create_dir_all(&self.root)?;
+        let path = self.root.join(START_LOCK_FILE);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        let deadline = Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(SessionLock { _file: file, path }),
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    thread::sleep(LOCK_POLL_INTERVAL);
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(ComlinkError::MeetingLifecycleBusy(
+                        "another meeting start is in progress".to_string(),
+                    ))
+                }
+                Err(TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+    }
+
     pub fn lock_session(
         &self,
         id: &str,

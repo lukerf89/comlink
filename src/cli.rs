@@ -746,17 +746,14 @@ fn run_models(command: ModelsCommand) -> Result<(), ComlinkError> {
             if !path.is_file() {
                 return Err(ComlinkError::ModelPathMissing(path));
             }
-            let mut resolved = config::load_persistent()?;
             let path = path.canonicalize()?;
-            config::select_model(&mut resolved, &name, path);
-            config::save(&resolved.paths, &resolved.config)?;
+            let selected = config::update_persistent(|resolved| {
+                config::select_model(resolved, &name, path);
+                Ok(resolved.config.selected_model.clone())
+            })?;
             println!(
                 "selected model: {}",
-                resolved
-                    .config
-                    .selected_model
-                    .as_deref()
-                    .unwrap_or("<none>")
+                selected.as_deref().unwrap_or("<none>")
             );
             Ok(())
         }
@@ -779,16 +776,17 @@ fn run_modes(command: ModesCommand) -> Result<(), ComlinkError> {
             if text::TextMode::parse(&deterministic_mode).is_none() {
                 return Err(ComlinkError::ModeNotFound(deterministic_mode));
             }
-            let mut resolved = config::load_persistent()?;
-            config::upsert_mode(
-                &mut resolved.config,
-                name.clone(),
-                description,
-                Some(deterministic_mode),
-                Some(instruction),
-                style_profile,
-            );
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                config::upsert_mode(
+                    &mut resolved.config,
+                    name.clone(),
+                    description,
+                    Some(deterministic_mode),
+                    Some(instruction),
+                    style_profile,
+                );
+                Ok(())
+            })?;
             println!("saved mode: {name}");
             Ok(())
         }
@@ -808,11 +806,12 @@ fn run_modes(command: ModesCommand) -> Result<(), ComlinkError> {
             print_processed_text(&output, format)
         }
         ModesCommand::Remove { name } => {
-            let mut resolved = config::load_persistent()?;
-            if !config::remove_mode(&mut resolved.config, &name) {
-                return Err(ComlinkError::NotFound { kind: "mode", name });
-            }
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                if !config::remove_mode(&mut resolved.config, &name) {
+                    return Err(ComlinkError::NotFound { kind: "mode", name });
+                }
+                Ok(())
+            })?;
             println!("removed mode");
             Ok(())
         }
@@ -828,9 +827,10 @@ fn run_styles(command: StylesCommand) -> Result<(), ComlinkError> {
                 profile.name = name;
             }
             let profile_name = profile.name.clone();
-            let mut resolved = config::load_persistent()?;
-            config::upsert_style_profile(&mut resolved.config, profile);
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                config::upsert_style_profile(&mut resolved.config, profile);
+                Ok(())
+            })?;
             println!("saved style profile: {profile_name}");
             Ok(())
         }
@@ -847,9 +847,14 @@ fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
             phrase,
             replacement,
         } => {
-            let mut resolved = config::load_persistent()?;
-            config::upsert_vocabulary(&mut resolved.config, phrase.clone(), replacement.clone());
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                config::upsert_vocabulary(
+                    &mut resolved.config,
+                    phrase.clone(),
+                    replacement.clone(),
+                );
+                Ok(())
+            })?;
             println!("{phrase} -> {replacement}");
             Ok(())
         }
@@ -858,14 +863,15 @@ fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
             print_vocabulary(&resolved.config.vocabulary, format)
         }
         VocabCommand::Remove { phrase } => {
-            let mut resolved = config::load_persistent()?;
-            if !config::remove_vocabulary(&mut resolved.config, &phrase) {
-                return Err(ComlinkError::NotFound {
-                    kind: "vocabulary",
-                    name: phrase,
-                });
-            }
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                if !config::remove_vocabulary(&mut resolved.config, &phrase) {
+                    return Err(ComlinkError::NotFound {
+                        kind: "vocabulary",
+                        name: phrase,
+                    });
+                }
+                Ok(())
+            })?;
             println!("removed vocabulary phrase");
             Ok(())
         }
@@ -875,10 +881,11 @@ fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
 fn run_snippets(command: SnippetsCommand) -> Result<(), ComlinkError> {
     match command {
         SnippetsCommand::Add { trigger, body } => {
-            let mut resolved = config::load_persistent()?;
             let body = decode_cli_newlines(&body);
-            config::upsert_snippet(&mut resolved.config, trigger.clone(), body);
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                config::upsert_snippet(&mut resolved.config, trigger.clone(), body);
+                Ok(())
+            })?;
             println!("saved snippet: {trigger}");
             Ok(())
         }
@@ -887,14 +894,15 @@ fn run_snippets(command: SnippetsCommand) -> Result<(), ComlinkError> {
             print_snippets(&resolved.config.snippets, format)
         }
         SnippetsCommand::Remove { trigger } => {
-            let mut resolved = config::load_persistent()?;
-            if !config::remove_snippet(&mut resolved.config, &trigger) {
-                return Err(ComlinkError::NotFound {
-                    kind: "snippet",
-                    name: trigger,
-                });
-            }
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                if !config::remove_snippet(&mut resolved.config, &trigger) {
+                    return Err(ComlinkError::NotFound {
+                        kind: "snippet",
+                        name: trigger,
+                    });
+                }
+                Ok(())
+            })?;
             println!("removed snippet");
             Ok(())
         }

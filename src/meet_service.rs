@@ -41,6 +41,9 @@ pub const DEFAULT_FINALIZE_LOCK_WAIT: Duration = Duration::from_secs(30);
 const DETACH_LOCK_WAIT: Duration = Duration::from_secs(2);
 const RECORDER_SETTLE: Duration = Duration::from_millis(250);
 const FINALIZE_LOG_FILE: &str = "finalize.log";
+/// How long a start waits for a concurrent start to finish before reporting
+/// `meeting_lifecycle_busy`.
+const START_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Everything a meeting operation needs. `runtime` is injected by the CLI (or
 /// by tests); when `None`, operations resolve it from the session's model path
@@ -128,12 +131,20 @@ impl FinalizeLauncher for ProcessFinalizeLauncher {
         // Reap the finalizer when it exits. The thread only waits: it never
         // signals the child, and if this process exits first the finalizer is
         // reparented and keeps running, exactly as without the thread. If the
-        // thread cannot be spawned the child is left unreaped, as before.
-        let _ = std::thread::Builder::new()
+        // thread cannot be spawned the child is left unreaped (a zombie once
+        // it exits); that is recorded in the session's finalize.log, since
+        // this service never prints.
+        if let Err(error) = std::thread::Builder::new()
             .name("comlink-finalize-reaper".to_string())
             .spawn(move || {
                 let _ = child.wait();
-            });
+            })
+        {
+            append_finalize_log(
+                session,
+                &format!("could not start the finalizer reaper thread: {error}"),
+            );
+        }
         Ok(identity)
     }
 }
@@ -441,6 +452,8 @@ pub fn start(ctx: &MeetContext, request: StartRequest) -> Result<MeetStartStatus
         build_meeting_source_metadata(source, &device, system_device, &runtime.ffmpeg)?;
     let chunk_seconds = chunk_seconds.max(1);
     let store = ctx.store();
+    // Held until the new session is recording and is the active one.
+    let _start_lock = store.lock_start(START_LOCK_WAIT)?;
 
     if let Some(active_id) = store.active_session_id()? {
         match store.read_session(&active_id) {
@@ -1471,6 +1484,7 @@ pub fn transcript(
         }
         MeetingStatus::Stopped => {}
     }
+    check_transcript_confined(&store, &id, &session)?;
     let export = store.validate_export_for_recovery(&session)?;
     let (format, content) = match kind {
         meet::MeetingExportKind::Markdown => (
@@ -1498,6 +1512,46 @@ pub fn transcript(
         warnings: export.warnings,
         audio_level: export.audio_level,
     })
+}
+
+/// Transcript text goes to the calling model, so the files read must be this
+/// session's own: `session.json` must name the requested id, the session
+/// directory must not be a symlink, and both export paths (which are stored
+/// as absolute paths in `session.json`) must resolve inside that directory.
+fn check_transcript_confined(
+    store: &meet::FileMeetingStore,
+    id: &str,
+    session: &MeetingSessionState,
+) -> Result<(), ComlinkError> {
+    let dir = store.root().join(id);
+    let unreadable = |reason: String| ComlinkError::MeetingSessionUnreadable {
+        id: id.to_string(),
+        path: dir.join("session.json"),
+        reason,
+    };
+    if session.session_id != id {
+        return Err(unreadable(format!(
+            "session.json names session {:?}, not {id:?}",
+            session.session_id
+        )));
+    }
+    if fs::symlink_metadata(&dir)?.file_type().is_symlink() {
+        return Err(unreadable(
+            "the session directory is a symlink; transcripts are only read from inside the meeting store".to_string(),
+        ));
+    }
+    let canonical_dir = dir.canonicalize()?;
+    for path in [&session.json_export_path, &session.markdown_export_path] {
+        // A missing export is reported by the read that follows.
+        if let Ok(resolved) = Path::new(path).canonicalize() {
+            if !resolved.starts_with(&canonical_dir) {
+                return Err(ComlinkError::MeetingExportUnavailable(PathBuf::from(
+                    format!("{path} (outside the session directory {})", dir.display()),
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The recorded finalize error of a `failed` session. A failed session with

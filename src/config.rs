@@ -254,6 +254,39 @@ pub fn load_persistent() -> Result<ResolvedConfig, ComlinkError> {
     })
 }
 
+/// Read-modify-write the persistent config file under an exclusive advisory
+/// lock (`config.json.lock` beside it), held from the read through the atomic
+/// rename. Concurrent writers (two CLI commands, or `config set
+/// mcp.allow_start false` racing any other mutation) therefore never save a
+/// stale snapshot over each other: a successful revocation stays revoked.
+/// `update` returning an error saves nothing.
+pub fn update_persistent<T>(
+    update: impl FnOnce(&mut ResolvedConfig) -> Result<T, ComlinkError>,
+) -> Result<T, ComlinkError> {
+    let paths = resolve_paths()?;
+    let _lock = lock_config_file(&paths)?;
+    let mut resolved = load_persistent()?;
+    let value = update(&mut resolved)?;
+    save(&resolved.paths, &resolved.config)?;
+    Ok(value)
+}
+
+fn lock_config_file(paths: &ConfigPaths) -> Result<fs::File, ComlinkError> {
+    if let Some(parent) = paths.config_file.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut lock_path = paths.config_file.clone().into_os_string();
+    lock_path.push(".lock");
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(PathBuf::from(lock_path))?;
+    // Blocking: config writes are short, and every writer takes this lock.
+    file.lock()?;
+    Ok(file)
+}
+
 pub fn save(paths: &ConfigPaths, config: &Config) -> Result<(), ComlinkError> {
     if let Some(parent) = paths.config_file.parent() {
         fs::create_dir_all(parent)?;
@@ -302,9 +335,10 @@ pub fn set_key(key: &str, value: &str) -> Result<ConfigSetOutcome, ComlinkError>
         return Err(ComlinkError::UnknownConfigKey(key.to_string()));
     }
     let value = parse_bool_value(MCP_ALLOW_START_KEY, value)?;
-    let mut resolved = load_persistent()?;
-    resolved.config.mcp.allow_start = value;
-    save(&resolved.paths, &resolved.config)?;
+    let config_file = update_persistent(|resolved| {
+        resolved.config.mcp.allow_start = value;
+        Ok(resolved.paths.config_file.clone())
+    })?;
     let env_override = env::var(MCP_ALLOW_START_ENV)
         .ok()
         .filter(|raw| parse_bool_value(MCP_ALLOW_START_ENV, raw).ok() != Some(value));
@@ -314,7 +348,7 @@ pub fn set_key(key: &str, value: &str) -> Result<ConfigSetOutcome, ComlinkError>
     Ok(ConfigSetOutcome {
         key: MCP_ALLOW_START_KEY,
         value,
-        config_file: resolved.paths.config_file,
+        config_file,
         env_override,
         env_override_valid,
     })
@@ -1038,6 +1072,34 @@ mod tests {
                 error,
                 ComlinkError::InvalidConfigValue { name, .. } if name == MCP_ALLOW_START_ENV
             ));
+        });
+    }
+
+    #[test]
+    fn a_concurrent_config_mutation_cannot_undo_an_allow_start_revocation() {
+        with_isolated_home(None, |home| {
+            fs::write(home.join("config.json"), r#"{"mcp":{"allow_start":true}}"#).unwrap();
+            let (loaded_tx, loaded_rx) = std::sync::mpsc::channel();
+            // A slow writer (e.g. `vocab add`) reads the config, then takes a
+            // while before saving its snapshot.
+            let slow = std::thread::spawn(move || {
+                update_persistent(|resolved| {
+                    loaded_tx.send(()).unwrap();
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    upsert_vocabulary(&mut resolved.config, "a".into(), "b".into());
+                    Ok(())
+                })
+                .unwrap();
+            });
+            loaded_rx.recv().unwrap();
+            // The revocation lands while the slow writer holds its snapshot.
+            let outcome = set_key("mcp.allow_start", "false").unwrap();
+            assert!(!outcome.value);
+            slow.join().unwrap();
+
+            let saved = load_persistent().unwrap().config;
+            assert!(!saved.mcp.allow_start, "a stale snapshot re-enabled start");
+            assert_eq!(saved.vocabulary.len(), 1, "both writes survive");
         });
     }
 

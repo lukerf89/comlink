@@ -40,6 +40,10 @@ pub struct MockOptions {
     /// Write the real `tests/fixtures/audio/silence.wav` as every chunk, so
     /// the near-silent capture warning fires (whisper still returns text).
     pub silent: bool,
+    /// The mock recorder starts a long-lived child (`sleep`, which ignores
+    /// SIGINT as a background job) and writes its pid to
+    /// `<harness root>/descendant.pid`, like a wrapper that does not `exec`.
+    pub spawn_descendant: bool,
 }
 
 impl Default for MockOptions {
@@ -49,6 +53,7 @@ impl Default for MockOptions {
             fail_chunks: "",
             retain_audio: false,
             silent: false,
+            spawn_descendant: false,
         }
     }
 }
@@ -83,6 +88,10 @@ case " $* " in
     ;;
 esac
 out="${{@: -1}}"
+if [ -n "{descendant}" ]; then
+  sleep 300 &
+  echo "$!" > "{descendant}"
+fi
 chunks={chunks}
 mkdir -p "$(dirname "$out")"
 if [ "$chunks" -gt 0 ]; then
@@ -101,6 +110,11 @@ while true; do
 done
 "#,
                 chunks = options.chunks,
+                descendant = if options.spawn_descendant {
+                    root.join("descendant.pid").display().to_string()
+                } else {
+                    String::new()
+                },
                 silent = if options.silent {
                     silence_fixture().display().to_string()
                 } else {
