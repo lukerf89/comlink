@@ -558,7 +558,30 @@ pub fn stop_segmented_capture(
     }
 }
 
-pub fn segmented_capture_is_running(identity: &SegmentedCaptureIdentity) -> bool {
+/// A pid plus its OS-reported start time, so a recycled pid is never mistaken
+/// for the process that was originally recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    #[serde(default)]
+    pub process_started_at: Option<String>,
+}
+
+/// Capture the identity of a live pid (start time via `ps`).
+pub fn process_identity(pid: u32) -> ProcessIdentity {
+    ProcessIdentity {
+        pid,
+        process_started_at: process_start_time(pid),
+    }
+}
+
+/// Whether the identified process is still the same live process: the pid is
+/// running, its start time matches (when one was recorded), and, when a
+/// `command_needle` is given, its full command line contains that needle.
+pub fn process_identity_is_running(
+    identity: &ProcessIdentity,
+    command_needle: Option<&str>,
+) -> bool {
     if identity.pid == 0 || !process_is_running(identity.pid) {
         return false;
     }
@@ -569,9 +592,22 @@ pub fn segmented_capture_is_running(identity: &SegmentedCaptureIdentity) -> bool
         }
     }
 
-    process_command(identity.pid)
-        .map(|command| command.contains(&identity.output_pattern))
-        .unwrap_or(false)
+    match command_needle {
+        Some(needle) => process_command(identity.pid)
+            .map(|command| command.contains(needle))
+            .unwrap_or(false),
+        None => true,
+    }
+}
+
+pub fn segmented_capture_is_running(identity: &SegmentedCaptureIdentity) -> bool {
+    process_identity_is_running(
+        &ProcessIdentity {
+            pid: identity.pid,
+            process_started_at: identity.process_started_at.clone(),
+        },
+        Some(&identity.output_pattern),
+    )
 }
 
 pub fn process_is_running(pid: u32) -> bool {
@@ -949,5 +985,32 @@ mod tests {
 
         child.kill().unwrap();
         child.wait().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_identity_requires_matching_start_time_and_command() {
+        let mut child = system_command("/bin/sleep", "sleep")
+            .arg("31")
+            .spawn()
+            .unwrap();
+        let identity = process_identity(child.id());
+        assert!(identity.process_started_at.is_some());
+        assert!(process_identity_is_running(&identity, None));
+        assert!(process_identity_is_running(&identity, Some("sleep 31")));
+        assert!(!process_identity_is_running(
+            &identity,
+            Some("meet finalize not-this-session")
+        ));
+
+        let recycled = ProcessIdentity {
+            pid: identity.pid,
+            process_started_at: Some("Thu Jan  1 00:00:00 1970".to_string()),
+        };
+        assert!(!process_identity_is_running(&recycled, None));
+
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(!process_identity_is_running(&identity, None));
     }
 }

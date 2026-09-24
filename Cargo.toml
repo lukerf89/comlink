@@ -2,6 +2,8 @@
 name = "comlink"
 version = "0.1.0"
 edition = "2021"
+# std::fs::File::try_lock (meeting lifecycle lock) is stable since 1.89.
+rust-version = "1.89"
 description = "Local-first CLI for turning speech and audio files into useful work text."
 license = "MIT"
 
@@ -13,3 +15,7 @@ serde_json = "1"
 tempfile = "3"
 thiserror = "1"
 which = "6"
+
+[[test]]
+name = "meet_service_stdout"
+harness = false

@@ -81,7 +81,7 @@ fi
 
 trap 'exit 0' INT TERM
 while true; do
-  sleep 1
+  sleep 0.1
 done
 "#,
         );
@@ -617,6 +617,404 @@ fn meet_stop_clears_active_session_when_post_capture_asr_fails() {
         .exists());
 }
 
+fn start_meeting(runtime: &MockRuntime, chunks: u32) -> Value {
+    let start = runtime.run(
+        &[
+            "meet",
+            "start",
+            "--format",
+            "json",
+            "--chunk-seconds",
+            "30",
+            "--no-llm",
+        ],
+        chunks,
+        "",
+    );
+    assert_success(&start);
+    let start_json = json_stdout(&start);
+    wait_for_chunks(
+        Path::new(start_json["chunks_dir"].as_str().unwrap()),
+        chunks as usize,
+    );
+    start_json
+}
+
+fn status_json(runtime: &MockRuntime, id: Option<&str>) -> Value {
+    let mut args = vec!["meet", "status"];
+    if let Some(id) = id {
+        args.push(id);
+    }
+    args.extend(["--format", "json"]);
+    let output = runtime.run(&args, 0, "");
+    assert_success(&output);
+    json_stdout(&output)
+}
+
+/// Poll `meet status <id>` until it reports `want`, dumping diagnostics on
+/// timeout instead of hanging.
+fn poll_status(runtime: &MockRuntime, id: &str, want: &str) -> Value {
+    let mut last = Value::Null;
+    for _ in 0..300 {
+        last = status_json(runtime, Some(id));
+        if last["status"] == want {
+            return last;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let log = runtime.data.join("meetings").join(id).join("finalize.log");
+    panic!(
+        "timed out waiting for status {want}; last status: {last:#}\nfinalize.log:\n{}",
+        fs::read_to_string(log).unwrap_or_default()
+    );
+}
+
+fn wait_for_file(path: &Path) {
+    for _ in 0..300 {
+        if path.exists() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    panic!("timed out waiting for {}", path.display());
+}
+
+fn invocation_count(path: &Path) -> usize {
+    fs::read_to_string(path)
+        .map(|text| text.lines().count())
+        .unwrap_or(0)
+}
+
+fn store_for(runtime: &MockRuntime) -> comlink::meet::FileMeetingStore {
+    comlink::meet::FileMeetingStore::new(&comlink::config::ConfigPaths {
+        home_dir: runtime.home.clone(),
+        config_file: runtime.home.join("config.json"),
+        data_dir: runtime.data.clone(),
+        database_file: runtime.data.join("history.sqlite3"),
+        audio_dir: runtime.data.join("audio"),
+    })
+}
+
+fn assert_exports_match_golden(runtime: &MockRuntime, id: &str) {
+    let root = runtime.root();
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/meet");
+    for (format, fixture) in [("json", "export.json"), ("md", "export.md")] {
+        let output = runtime.run(&["meet", "export", id, "--format", format], 0, "");
+        assert_success(&output);
+        let actual = normalize_golden(&String::from_utf8_lossy(&output.stdout), &root, id);
+        let expected = fs::read_to_string(fixtures.join(fixture)).unwrap();
+        assert_eq!(
+            actual, expected,
+            "detached export differs from sync golden {fixture}"
+        );
+    }
+}
+
+fn session_state(runtime: &MockRuntime, id: &str) -> Value {
+    let path = runtime.data.join("meetings").join(id).join("session.json");
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn meet_status_reports_none_active_and_stale_recorder() {
+    let runtime = MockRuntime::new();
+
+    let none = status_json(&runtime, None);
+    assert_eq!(none["schema_version"], "comlink.meeting.v1");
+    assert_eq!(none["status"], "none");
+    assert!(none["session_id"].is_null());
+    assert_eq!(none["stale"], false);
+
+    let unknown = runtime.run(&["meet", "status", "missing", "--format", "json"], 0, "");
+    assert_eq!(unknown.status.code(), Some(1));
+    assert!(unknown.stdout.is_empty());
+
+    let start_json = start_meeting(&runtime, 2);
+    let id = start_json["session_id"].as_str().unwrap();
+    let active = status_json(&runtime, None);
+    assert_eq!(active["session_id"], id);
+    assert_eq!(active["status"], "recording");
+    assert_eq!(active["stale"], false);
+    assert!(active["stale_reason"].is_null());
+    assert_eq!(active["chunk_count"], 2);
+    assert!(active["finalizer"].is_null());
+    // Mock chunks are not PCM, so there is nothing measurable yet.
+    assert!(active["audio_level"].is_null());
+    let recorders = active["recorders"].as_array().unwrap();
+    assert_eq!(recorders.len(), 1);
+    assert_eq!(recorders[0]["alive"], true);
+    assert_eq!(recorders[0]["pid"], start_json["recorder_pid"]);
+    for key in [
+        "elapsed_ms",
+        "warnings",
+        "stale",
+        "stale_reason",
+        "audio_level",
+        "finalizer",
+    ] {
+        assert!(active.get(key).is_some(), "missing status key {key}");
+    }
+
+    let pid = start_json["recorder_pid"].as_u64().unwrap() as u32;
+    assert!(Command::new("kill")
+        .arg("-KILL")
+        .arg(pid.to_string())
+        .status()
+        .unwrap()
+        .success());
+    wait_until_not_running(pid);
+
+    let started = std::time::Instant::now();
+    let stale = status_json(&runtime, None);
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(stale["status"], "recording");
+    assert_eq!(stale["stale"], true);
+    assert_eq!(stale["recorders"][0]["alive"], false);
+    assert!(stale["stale_reason"]
+        .as_str()
+        .unwrap()
+        .contains("no recorder process is running"));
+
+    let text = runtime.run(&["meet", "status"], 0, "");
+    assert_success(&text);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(text.contains(&format!("session_id: {id}")));
+    assert!(text.contains("stale: true"));
+}
+
+#[test]
+fn meet_stop_detach_returns_immediately_and_finalizes_in_background() {
+    let runtime = MockRuntime::new();
+    let barrier = runtime.root().join("whisper-barrier");
+    let started_flag = runtime.root().join("whisper-started");
+    let counter = runtime.root().join("whisper-count");
+    let barrier_env = [
+        ("COMLINK_MOCK_WHISPER_BARRIER", barrier.to_str().unwrap()),
+        (
+            "COMLINK_MOCK_WHISPER_STARTED",
+            started_flag.to_str().unwrap(),
+        ),
+        ("COMLINK_MOCK_WHISPER_COUNTER", counter.to_str().unwrap()),
+    ];
+
+    let start_json = start_meeting(&runtime, 2);
+    let id = start_json["session_id"].as_str().unwrap();
+
+    let clock = std::time::Instant::now();
+    let stop = runtime.run_env(
+        &["meet", "stop", "--detach", "--format", "json"],
+        2,
+        &barrier_env,
+    );
+    let elapsed = clock.elapsed();
+    assert_success(&stop);
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "stop --detach took {elapsed:?}"
+    );
+    let stop_json = json_stdout(&stop);
+    assert_eq!(stop_json["status"], "transcribing");
+    assert_eq!(stop_json["session_id"], id);
+    assert_eq!(stop_json["chunk_count"], 2);
+    assert!(stop_json["finalizer_pid"].as_u64().unwrap() > 0);
+    assert!(!runtime
+        .data
+        .join("meetings")
+        .join("active-session")
+        .exists());
+
+    wait_for_file(&started_flag);
+    let transcribing = status_json(&runtime, None);
+    assert_eq!(transcribing["session_id"], id);
+    assert_eq!(transcribing["status"], "transcribing");
+    assert_eq!(transcribing["finalizer"]["alive"], true);
+    assert_eq!(transcribing["stale"], false);
+
+    fs::write(&barrier, "go").unwrap();
+    let stopped = poll_status(&runtime, id, "stopped");
+    assert_eq!(stopped["stale"], false);
+    assert_eq!(stopped["finalizer"], Value::Null);
+    assert_eq!(invocation_count(&counter), 2);
+
+    let state = session_state(&runtime, id);
+    assert_eq!(state["status"], "stopped");
+    assert!(state.get("finalizer").is_none());
+    assert!(state.get("error").is_none());
+    assert_eq!(state["chunks_processed"], 2);
+    assert_exports_match_golden(&runtime, id);
+
+    // With nothing active or transcribing, bare status is `none` again.
+    assert_eq!(status_json(&runtime, None)["status"], "none");
+
+    // Repeated finalize is an idempotent no-op: same status, no new ASR.
+    let first = runtime.run_env(
+        &["meet", "finalize", id, "--format", "json"],
+        0,
+        &barrier_env,
+    );
+    assert_success(&first);
+    let second = runtime.run_env(
+        &["meet", "finalize", id, "--format", "json"],
+        0,
+        &barrier_env,
+    );
+    assert_success(&second);
+    let root = runtime.root();
+    let first_text = normalize_golden(&String::from_utf8_lossy(&first.stdout), &root, id);
+    let second_text = normalize_golden(&String::from_utf8_lossy(&second.stdout), &root, id);
+    assert_eq!(first_text, second_text);
+    let golden_stop = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/meet/stop.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        first_text, golden_stop,
+        "finalize must print the sync stop shape"
+    );
+    assert_eq!(invocation_count(&counter), 2, "finalize re-ran whisper");
+}
+
+#[test]
+fn meet_finalize_marks_failed_on_whisper_error_and_recovers_on_rerun() {
+    let runtime = MockRuntime::new();
+    let start_json = start_meeting(&runtime, 2);
+    let id = start_json["session_id"].as_str().unwrap();
+
+    let stop = runtime.run_env(
+        &["meet", "stop", id, "--detach", "--format", "json"],
+        2,
+        &[("COMLINK_MOCK_FAIL_CHUNKS", "00001")],
+    );
+    assert_success(&stop);
+    let failed = poll_status(&runtime, id, "failed");
+    let error = failed["error"].as_str().unwrap();
+    assert!(error.contains("mock whisper failed for 00001"), "{error}");
+    assert_eq!(failed["stale"], false);
+    let log =
+        fs::read_to_string(runtime.data.join("meetings").join(id).join("finalize.log")).unwrap();
+    assert!(log.contains("mock whisper failed"));
+    assert!(
+        !log.contains("Meeting segment"),
+        "finalize.log leaked transcript text"
+    );
+
+    // Export is refused while failed.
+    let export = runtime.run(&["meet", "export", id, "--format", "json"], 0, "");
+    assert_eq!(export.status.code(), Some(1));
+
+    // Rerun with whisper healthy: finalize recovers to stopped.
+    let rerun = runtime.run(&["meet", "finalize", id, "--format", "json"], 0, "");
+    assert_success(&rerun);
+    assert_eq!(json_stdout(&rerun)["status"], "stopped");
+    let state = session_state(&runtime, id);
+    assert_eq!(state["status"], "stopped");
+    assert!(state.get("error").is_none());
+    assert!(state.get("finalizer").is_none());
+    assert_exports_match_golden(&runtime, id);
+
+    // A forced whisper failure surfaces the ASR exit code (3) from finalize.
+    let second = start_meeting(&runtime, 1);
+    let second_id = second["session_id"].as_str().unwrap();
+    let barrier = runtime.root().join("never");
+    let stop = runtime.run_env(
+        &["meet", "stop", second_id, "--detach", "--format", "json"],
+        1,
+        &[
+            ("COMLINK_MOCK_FAIL_CHUNKS", "00000"),
+            ("COMLINK_MOCK_WHISPER_BARRIER", barrier.to_str().unwrap()),
+        ],
+    );
+    assert_success(&stop);
+    let finalizer_pid = json_stdout(&stop)["finalizer_pid"].as_u64().unwrap();
+    // Kill the background finalizer so this foreground finalize owns the run.
+    let _ = Command::new("kill")
+        .arg("-KILL")
+        .arg(format!("-{finalizer_pid}"))
+        .status();
+    wait_until_not_running(finalizer_pid as u32);
+    let direct = runtime.run_env(
+        &["meet", "finalize", second_id, "--format", "json"],
+        0,
+        &[("COMLINK_MOCK_FAIL_CHUNKS", "00000")],
+    );
+    assert_eq!(direct.status.code(), Some(3));
+    assert!(direct.stdout.is_empty());
+    assert_eq!(session_state(&runtime, second_id)["status"], "failed");
+}
+
+#[test]
+fn meet_finalize_recovers_after_finalizer_is_killed_mid_transcription() {
+    let runtime = MockRuntime::new();
+    let barrier = runtime.root().join("whisper-barrier");
+    let started_flag = runtime.root().join("whisper-started");
+    let start_json = start_meeting(&runtime, 2);
+    let id = start_json["session_id"].as_str().unwrap();
+
+    let stop = runtime.run_env(
+        &["meet", "stop", id, "--detach", "--format", "json"],
+        2,
+        &[
+            ("COMLINK_MOCK_WHISPER_BARRIER", barrier.to_str().unwrap()),
+            (
+                "COMLINK_MOCK_WHISPER_STARTED",
+                started_flag.to_str().unwrap(),
+            ),
+        ],
+    );
+    assert_success(&stop);
+    let finalizer_pid = json_stdout(&stop)["finalizer_pid"].as_u64().unwrap() as u32;
+    wait_for_file(&started_flag);
+    assert!(store_for(&runtime).is_session_locked(id).unwrap());
+
+    // Real crash: SIGKILL only the finalizer (its whisper child is orphaned).
+    assert!(Command::new("kill")
+        .arg("-KILL")
+        .arg(finalizer_pid.to_string())
+        .status()
+        .unwrap()
+        .success());
+    wait_until_not_running(finalizer_pid);
+
+    let stale = status_json(&runtime, Some(id));
+    assert_eq!(stale["status"], "transcribing");
+    assert_eq!(stale["stale"], true);
+    assert_eq!(stale["finalizer"]["alive"], false);
+    assert!(stale["stale_reason"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("comlink meet finalize {id}")));
+    // The kernel released the dead holder's lock.
+    let lock = store_for(&runtime)
+        .lock_session(id, comlink::meet::LockWait::Try, "test")
+        .unwrap();
+    drop(lock);
+
+    fs::write(&barrier, "go").unwrap();
+    let rerun = runtime.run(&["meet", "finalize", id, "--format", "json"], 0, "");
+    assert_success(&rerun);
+    assert_eq!(json_stdout(&rerun)["status"], "stopped");
+    assert_exports_match_golden(&runtime, id);
+}
+
+#[test]
+fn meet_plain_stop_stays_synchronous() {
+    let runtime = MockRuntime::new();
+    let start_json = start_meeting(&runtime, 2);
+    let id = start_json["session_id"].as_str().unwrap();
+    let stop = runtime.run(&["meet", "stop", "--format", "json"], 2, "");
+    assert_success(&stop);
+    // The transcript exists by the time the synchronous stop returns.
+    assert_eq!(json_stdout(&stop)["status"], "stopped");
+    assert_eq!(session_state(&runtime, id)["status"], "stopped");
+    assert!(!runtime
+        .data
+        .join("meetings")
+        .join(id)
+        .join("finalize.log")
+        .exists());
+    assert_exports_match_golden(&runtime, id);
+}
+
 /// Golden regression for the byte-level CLI contract of `meet start`, `meet
 /// stop`, and `meet export`. The fixtures under `tests/fixtures/meet/` were
 /// captured from the pre-refactor revision (97988d2) with:
@@ -755,7 +1153,9 @@ fn json_stdout(output: &Output) -> Value {
 }
 
 fn wait_for_chunks(chunks_dir: &Path, expected: usize) {
-    for _ in 0..100 {
+    // Generous bound: mock recorders are bash scripts and can start slowly
+    // when the machine is loaded; the loop exits as soon as chunks appear.
+    for _ in 0..500 {
         let count = fs::read_dir(chunks_dir)
             .map(|entries| {
                 entries
@@ -779,7 +1179,7 @@ fn wait_for_chunks(chunks_dir: &Path, expected: usize) {
 }
 
 fn wait_until_not_running(pid: u32) {
-    for _ in 0..100 {
+    for _ in 0..500 {
         if !comlink::record::process_is_running(pid) {
             return;
         }

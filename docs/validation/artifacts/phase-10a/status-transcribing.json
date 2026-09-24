@@ -1,0 +1,24 @@
+{
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "s1790223215961300000-62994-0",
+  "status": "transcribing",
+  "elapsed_ms": 961,
+  "recorders": [
+    {
+      "source_label": "user_mic",
+      "device": ":0",
+      "pid": 62995,
+      "alive": false
+    }
+  ],
+  "finalizer": {
+    "pid": 63040,
+    "alive": true
+  },
+  "chunk_count": 2,
+  "audio_level": null,
+  "warnings": [],
+  "stale": false,
+  "stale_reason": null,
+  "error": null
+}

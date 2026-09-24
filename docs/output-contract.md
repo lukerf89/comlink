@@ -70,6 +70,88 @@ Structured transcript output is written only to stdout. Diagnostics such as reco
 - `4`: no speech or recording too short.
 - `5`: clipboard delivery failure.
 
+## Meeting Commands (`comlink.meeting.v1`)
+
+`meet start`, `meet stop`, `meet status`, `meet finalize`, and `meet export` emit meeting payloads identified by `schema_version: "comlink.meeting.v1"`. As with transcripts, stdout carries only the structured payload and stderr carries diagnostics: the consent reminder, `Stopping meeting recording: <id>`, the warning banner, and the background-transcription notice.
+
+### Session status values
+
+A meeting session's `status` is one of:
+
+- `recording`: recorders are capturing chunks.
+- `transcribing`: recorders are stopped and a detached `meet finalize` owns transcription (only after `meet stop --detach`).
+- `stopped`: the transcript exports are written.
+- `failed`: a detached finalize failed. The session carries an `error` string (error text only, never transcript content). Rerun `comlink meet finalize <id>` to retry.
+
+`transcribing` and `failed` are additive in Phase 10a. A plain synchronous `meet stop` never produces them.
+
+### `meet stop --detach`
+
+This stops the recorders, marks the session `transcribing`, launches `comlink meet finalize <id>` in its own process group, clears the active session, and returns straight away:
+
+```json
+{
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "...",
+  "status": "transcribing",
+  "elapsed_ms": 0,
+  "preliminary_duration_ms": 0,
+  "chunk_count": 0,
+  "finalizer_pid": 0,
+  "artifacts": { "session_dir": "...", "segments_jsonl": "...", "json_export": "...", "markdown_export": "...", "chunks_dir": null },
+  "finalize_log": "<session_dir>/finalize.log"
+}
+```
+
+Because detaching clears the active session, a new `meet start` is allowed while the earlier meeting is still transcribing. The finalizer's stderr goes to `finalize.log`.
+
+### `meet finalize <id>`
+
+This finishes a `transcribing` or `failed` session and prints the same payload shape as a synchronous `meet stop`, in `--format text|json`. It is meant for internal use (the detached launch) and for recovery. It is idempotent:
+
+- On a `stopped` session it reprints the stop payload, rebuilt from the validated JSON export, without running ASR again.
+- If an earlier finalize crashed after the exports were written, it recovers from the validated JSON export and regenerates the Markdown and JSONL.
+- On a `recording` session it exits 1.
+
+### `meet status [id]`
+
+This command is read-only. With no id it reports the active recording session, or else the newest `transcribing` session, or else `status: "none"`. To keep polling a session after it finishes, pass its id: once nothing is recording or transcribing, a bare `meet status` reports `none`.
+
+```json
+{
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "..." ,
+  "status": "recording | transcribing | stopped | failed | none",
+  "elapsed_ms": 0,
+  "recorders": [{ "source_label": "user_mic", "device": ":0", "pid": 0, "alive": true }],
+  "finalizer": { "pid": 0, "alive": true },
+  "chunk_count": 0,
+  "audio_level": { "mean_dbfs": -30.0, "peak_dbfs": -6.0, "near_silent": false },
+  "warnings": [],
+  "stale": false,
+  "stale_reason": null,
+  "error": null
+}
+```
+
+- For `status: "none"`, `session_id` and `elapsed_ms` are `null`.
+- `finalizer` is `null` unless a detached finalizer is recorded.
+- `audio_level` is `null` when nothing measurable is available. It comes from the newest completed chunk; the newest chunk of a live recorder is skipped because it may still be being written. A near-silent level adds a warning.
+- `stale` is `true` in two cases:
+  - A `recording` session has no live recorder.
+  - A `transcribing` session has no live finalizer and nobody holds its lifecycle lock (for example, after a crash, logout, or reboot).
+
+  In either case `stale_reason` names the recovery command, and `status` itself never hangs.
+
+### Meeting exit codes
+
+The codes in the table below are unchanged. The meeting-specific cases are:
+
+- `meet status` exits `0` for any readable state, including `none`. An unknown session id exits `1`.
+- Another comlink process holding the session's lifecycle lock exits `1` (`meeting session is busy`).
+- A detached finalizer that cannot be launched exits `1`, and the session is marked `failed`.
+- `meet finalize` exits with the underlying error's code, so a whisper.cpp failure exits `3`.
+
 ## Agent Examples
 
 Parse a saved JSON transcript:
