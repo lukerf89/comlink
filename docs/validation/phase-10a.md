@@ -170,9 +170,65 @@ cargo test --test meet_lifecycle --test meet_service   # 3 more runs, all green
 ### New known limitations
 
 - The cleanup-failure test makes a directory read-only, so it cannot fail as root. The suite is not run as root.
-- `privacy audit` does not look inside session directories whose `session.json` is unreadable. `meet status` reports those as errors instead.
+- ~~`privacy audit` does not look inside session directories whose `session.json` is unreadable.~~ Fixed in the micro-round below.
 - If both the `failed` save and the `finalize.log` append fail (for example, on a read-only session directory with no existing log), the save failure is lost. The original error is still returned.
 - While a session is `failed` because of a cleanup failure, `meet export` refuses it until `meet finalize <id>` succeeds. The transcript files stay on disk.
+
+## Micro-Round (LF-161 confirming-review findings)
+
+### Changes
+
+- **M1 (privacy): the `meeting_audio` scan is conservative and never fails the audit.** `meet_service::meeting_audio_audit` replaces `unretained_audio_leftovers` and reads each session directory on its own. It lists: (a) a directory whose `session.json` is missing or unreadable but which holds chunk WAVs, or whose chunks dir cannot be read (status `unknown`, named by `session_dir`, with a `reason`); (b) a readable session with `retention.audio=false` whose chunks dir cannot be read (`reason: unreadable chunks dir under <chunks_dir>: ...`); (c) a `recording` session with `retention.audio=false` and chunk WAVs whose recorder is not verified running (`session_recorder_is_verified_running`), with remedy `comlink meet stop <id>`. A failure to list the store itself goes into a new `scan_errors` list. `clean` is true only when both lists are empty. Previously, one unreadable chunks dir aborted the whole `privacy audit` with a bare `Permission denied`. New fields `session_dir`, `reason` and `scan_errors` are additive. See `docs/output-contract.md`.
+- **M2 (privacy): synchronous `meet stop` now uses the finalize ordering.** After ASR, sync stop writes the exports, deletes unretained chunks, then saves the final `stopped`. If the delete fails, it saves `failed` with the cleanup error (and `chunks_processed`) and returns `MeetingChunkCleanupFailed` (exit 1). `meet finalize <id>` then recovers from the export with no ASR, deletes the chunks, and commits `stopped`. The preliminary `stopped` save before ASR is unchanged, so an ASR failure still leaves `stopped` without exports. Successful stop stdout is unchanged (goldens byte-identical).
+- **M3a.** The `MeetingChunkCleanupFailed` reason is `could not delete <chunks_dir>: <io error>`.
+- **M3b.** On the finalizer launch-failure path, a failure to clear the active-session pointer is appended to `finalize.log` (with the original launch error) instead of being dropped.
+- **M3c (restriction).** On a `stopped` session, `meet finalize` falls through to ASR only when no JSON export exists at all. A JSON export that exists but fails validation (for example, a user-edited file) returns `MeetingExportUnavailable` (exit 1). The export, the chunks and the session state are left untouched, so the user's edit is never silently overwritten. `transcribing` and `failed` sessions are unchanged: an invalid export there is still rewritten from the chunks, because it can only come from an interrupted finalize.
+
+### Tests added
+
+`tests/meet_service.rs`:
+- `meeting_audio_audit_names_a_corrupt_session_that_still_holds_chunks`
+- `meeting_audio_audit_survives_an_unreadable_chunks_dir_and_names_it`
+- `meeting_audio_audit_flags_stale_recordings_but_not_live_ones`
+- `meeting_audio_audit_records_an_unreadable_store_root_instead_of_failing`
+- `sync_stop_cleanup_failure_is_failed_and_finalize_finishes_it` (M2 and M3a)
+- `launch_failure_logs_an_active_pointer_clear_failure` (M3b)
+- `finalize_never_overwrites_an_invalid_export_on_a_stopped_session` (M3c)
+
+`tests/meet_lifecycle.rs`:
+- `privacy_audit_survives_unreadable_meeting_dirs_and_names_them` (real CLI: exit 0, `clean=false`, both paths named, in JSON and text)
+
+### Mutation checks (fix reverted, test red, restored, green)
+
+| Reverted | Failing test |
+|---|---|
+| M1: whole scan reverted to the old `list_sessions` logic | `privacy_audit_survives_unreadable_meeting_dirs_and_names_them`, `meeting_audio_audit_names_a_corrupt_session_that_still_holds_chunks`, `meeting_audio_audit_survives_an_unreadable_chunks_dir_and_names_it`, `meeting_audio_audit_flags_stale_recordings_but_not_live_ones`, `meeting_audio_audit_records_an_unreadable_store_root_instead_of_failing` |
+| M1: unreadable `session.json` entries dropped | `meeting_audio_audit_names_a_corrupt_session_that_still_holds_chunks`, `privacy_audit_survives_unreadable_meeting_dirs_and_names_them` |
+| M1: unreadable chunks dir dropped | `meeting_audio_audit_survives_an_unreadable_chunks_dir_and_names_it`, `privacy_audit_survives_unreadable_meeting_dirs_and_names_them` |
+| M1: all `recording` sessions skipped / the verified-running check removed | `meeting_audio_audit_flags_stale_recordings_but_not_live_ones` |
+| M2: sync stop saves `stopped` before the chunk delete again | `sync_stop_cleanup_failure_is_failed_and_finalize_finishes_it` |
+| M3a: bare io error as the reason | `sync_stop_cleanup_failure_is_failed_and_finalize_finishes_it` |
+| M3b: `let _ = clear_active_if_matches(..)` | `launch_failure_logs_an_active_pointer_clear_failure` |
+| M3c: a stopped session with an invalid export and chunks falls through to ASR | `finalize_never_overwrites_an_invalid_export_on_a_stopped_session` |
+
+### Commands and results
+
+```bash
+cargo fmt --check                              # ok
+cargo clippy --all-targets -- -D warnings      # ok
+cargo test --all                               # ok (meet_lifecycle 16, meet_service 30, stdout probe 0 bytes)
+cargo run -- doctor                            # ok
+cargo run -- meet status --format json         # status none
+bash scripts/e2e/phase-10a-meet-service.sh     # passed
+cargo test --test meet_lifecycle --test meet_service   # 3 more runs, all green
+```
+
+### New known limitations
+
+- A session directory whose `session.json` is unreadable is listed only when it holds chunk WAVs (searched two levels deep under `<session_dir>/chunks`) or its chunks dir cannot be read. WAVs stored anywhere else in such a directory are not seen.
+- A stale `recording` session with no chunk WAVs is not listed, because it holds no audio.
+- The M1, M2 and M3b tests make a directory unreadable or read-only, so they cannot fail as root. The suite is not run as root.
+- The audit also lists a session directory whose `session.json` has not been written yet but whose chunks exist (a `meet start` in the gap between creating the chunks dir and saving `session.json`). This is conservative, and in practice the chunks dir is empty at that point.
 
 ## Manual Test Instructions (pause gate)
 
@@ -194,3 +250,4 @@ Use your normal config with a real microphone and whisper model.
 3. **Export is unchanged.** Run `cargo run -- meet export --format json` and `--format md` for the stopped session and confirm the output looks as it did before this phase.
 4. **Optional recovery check.** During a detached transcription, kill the finalizer with `kill -9 <finalizer_pid>`. Confirm `meet status <id>` shows `stale: true` with a `comlink meet finalize <id>` hint, then run that command and confirm it reaches `stopped`.
 5. **Privacy audit sees leftover meeting audio (fix round).** With `retention.audio` off, after a stopped meeting run `cargo run -- privacy audit` and confirm `meeting_audio: clean=true`. Copy any WAV into that session's `chunks/` directory, rerun the audit, and confirm `clean=false` with a `comlink meet finalize <id>` remedy. Run that command, then confirm the audit is clean again and the WAV is gone.
+6. **Privacy audit names unreadable meeting dirs (micro-round).** With `retention.audio` off, create `<data_dir>/meetings/broken/chunks/` (use the data dir that `cargo run -- config show` reports), put any WAV in it, and write `{` to `broken/session.json`. Run `cargo run -- privacy audit` and confirm it exits 0 with `clean=false` and a `meeting_audio_leftover: session=broken status=unknown ...` line naming the directory. Delete `broken/`, then confirm the audit is clean again.

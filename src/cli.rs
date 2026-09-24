@@ -875,10 +875,8 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
             let selected_model = config::selected_model_path(&resolved.config);
             let dependencies = deps::inspect_with_model_path(selected_model.clone());
             let system_audio_report = system_audio::inspect(&dependencies);
-            let meeting_leftovers = meet_service::unretained_audio_leftovers(&MeetContext::new(
-                resolved.clone(),
-                None,
-            ))?;
+            let meeting_audio =
+                meet_service::meeting_audio_audit(&MeetContext::new(resolved.clone(), None));
             let audit = PrivacyAudit {
                 history_enabled: resolved.config.history_enabled,
                 retention: resolved.config.retention.clone(),
@@ -907,10 +905,7 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
                     routing_permission: system_audio_report.permissions.system_audio_routing.detail,
                     raw_audio_retained: resolved.config.retention.audio,
                 },
-                meeting_audio: PrivacyMeetingAudio {
-                    clean: meeting_leftovers.is_empty(),
-                    unretained_leftovers: meeting_leftovers,
-                },
+                meeting_audio,
             };
             print_privacy_audit(&audit, format)
         }
@@ -1337,15 +1332,9 @@ struct PrivacyAudit {
     asr: String,
     llm: String,
     system_audio: PrivacySystemAudio,
-    meeting_audio: PrivacyMeetingAudio,
-}
-
-/// Meeting chunk WAVs still on disk for sessions whose retention policy does
-/// not keep audio. `clean` is false while any remain.
-#[derive(Debug, Clone, Serialize)]
-struct PrivacyMeetingAudio {
-    clean: bool,
-    unretained_leftovers: Vec<meet_service::UnretainedMeetingAudio>,
+    /// Meeting audio the retention policy does not keep. `clean` is false
+    /// while any is listed or the scan hit an error.
+    meeting_audio: meet_service::MeetingAudioAudit,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1488,18 +1477,26 @@ fn print_privacy_audit(audit: &PrivacyAudit, format: ConfigFormat) -> Result<(),
                 audit.system_audio.routing_permission
             );
             println!(
-                "meeting_audio: clean={} unretained_leftovers={}",
+                "meeting_audio: clean={} unretained_leftovers={} scan_errors={}",
                 audit.meeting_audio.clean,
-                audit.meeting_audio.unretained_leftovers.len()
+                audit.meeting_audio.unretained_leftovers.len(),
+                audit.meeting_audio.scan_errors.len()
             );
             for leftover in &audit.meeting_audio.unretained_leftovers {
                 println!(
-                    "meeting_audio_leftover: session={} status={} chunk_files={} chunks_dir={} remedy=`{}`",
+                    "meeting_audio_leftover: session={} status={} chunk_files={} chunks_dir={} remedy=`{}` reason={}",
                     leftover.session_id,
                     leftover.status,
                     leftover.chunk_files,
                     leftover.chunks_dir,
-                    leftover.remedy
+                    leftover.remedy,
+                    leftover.reason
+                );
+            }
+            for scan_error in &audit.meeting_audio.scan_errors {
+                println!(
+                    "meeting_audio_scan_error: path={} reason={}",
+                    scan_error.path, scan_error.reason
                 );
             }
         }

@@ -8,7 +8,7 @@
 //! consent reminder) are returned as data.
 
 use std::{
-    fs::OpenOptions,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
@@ -419,6 +419,8 @@ pub fn stop(
 /// Synchronous stop for a session returned by [`prepare_stop`]. Keeps the
 /// historical ordering: the session is marked stopped (and the active pointer
 /// cleared) before ASR, so an ASR failure leaves it stopped without exports.
+/// After ASR it writes the exports, deletes unretained chunks, then saves the
+/// final `stopped`; a failed chunk delete leaves the session `failed`.
 pub fn stop_prepared(
     ctx: &MeetContext,
     mut session: MeetingSessionState,
@@ -453,13 +455,19 @@ pub fn stop_prepared(
     session.chunks_processed = Some(pipeline.chunks.len());
     let export = export_from_pipeline(&session, &pipeline);
 
-    store.save_session(&session)?;
+    // Same ordering as detached finalize: exports, then unretained audio, then
+    // the final `stopped` save. Until that save, session.json holds the
+    // preliminary `stopped` written before ASR. If the chunk delete fails the
+    // session is saved `failed` (exports are on disk), so `meet finalize <id>`
+    // recovers from the export, retries the delete and commits `stopped`.
     store.write_segments_jsonl(&export)?;
     store.write_exports(&export)?;
-    // The session is already `stopped` here (historical sync ordering). If
-    // cleanup fails, `meet finalize <id>` deletes the leftover chunks and
-    // `privacy audit` reports them until then.
-    delete_unretained_chunks(&store, &session)?;
+    if let Err(error) = delete_unretained_chunks(&store, &session) {
+        session.mark_failed(error.to_string());
+        record_failed_state(&store, &session, &error);
+        return Err(error);
+    }
+    store.save_session(&session)?;
 
     Ok(stop_status_from_export(
         &session,
@@ -536,7 +544,15 @@ pub fn stop_detached_prepared(
             append_finalize_log(&session, &message);
             session.mark_failed(message);
             record_failed_state(&store, &session, &error);
-            let _ = store.clear_active_if_matches(&session.session_id);
+            if let Err(clear_error) = store.clear_active_if_matches(&session.session_id) {
+                append_finalize_log(
+                    &session,
+                    &format!(
+                        "could not clear the active-session pointer for {} ({clear_error}); original error: {error}",
+                        session.session_id
+                    ),
+                );
+            }
             drop(lock);
             Err(error)
         }
@@ -551,8 +567,9 @@ pub fn stop_detached_prepared(
 /// delete unretained chunks, then commit `stopped`. Idempotent: on a `stopped`
 /// session with a valid export it returns the same status rebuilt from that
 /// export without re-transcribing, after deleting any chunks left behind while
-/// `retention.audio` is off. A `stopped` session with no valid export but with
-/// chunks on disk (a synchronous stop whose ASR failed) is transcribed.
+/// `retention.audio` is off. A `stopped` session with no JSON export at all but
+/// with chunks on disk (a synchronous stop whose ASR failed) is transcribed; a
+/// `stopped` session whose JSON export exists but is invalid is an error.
 pub fn finalize(
     ctx: &MeetContext,
     id: &str,
@@ -586,7 +603,16 @@ pub fn finalize(
                 let chunks_processed = session.chunks_processed.unwrap_or_default();
                 return Ok(stop_status_from_export(&session, export, chunks_processed));
             }
-            Err(error) if session_chunk_count(&store, &session)? == 0 => return Err(error),
+            // Only a stopped session with no JSON export at all (a synchronous
+            // stop whose ASR failed) and chunks on disk is transcribed. A JSON
+            // export that exists but does not validate is reported, never
+            // overwritten: it may have been edited by the user.
+            Err(error)
+                if Path::new(&session.json_export_path).exists()
+                    || session_chunk_count(&store, &session)? == 0 =>
+            {
+                return Err(error)
+            }
             Err(_) => {}
         },
         MeetingStatus::Transcribing | MeetingStatus::Failed => {}
@@ -661,7 +687,7 @@ fn delete_unretained_chunks(
         .delete_chunks(session)
         .map_err(|error| ComlinkError::MeetingChunkCleanupFailed {
             id: session.session_id.clone(),
-            reason: error.to_string(),
+            reason: format!("could not delete {}: {error}", session.chunks_dir),
         })
 }
 
@@ -1200,45 +1226,226 @@ pub fn list(ctx: &MeetContext) -> Result<MeetSessionList, ComlinkError> {
 // privacy: leftover unretained audio
 // ---------------------------------------------------------------------------
 
-/// A meeting whose retention policy does not keep audio but whose chunk WAVs
-/// are still on disk.
+/// A meeting session directory that may still hold unretained audio: its
+/// retention policy does not keep audio (or cannot be read) and chunk WAVs are
+/// on disk (or its chunks directory cannot be read).
 #[derive(Debug, Clone, Serialize)]
 pub struct UnretainedMeetingAudio {
+    /// The session id (the directory name when `session.json` is unreadable).
     pub session_id: String,
+    /// The session status, or `unknown` when `session.json` is unreadable.
     pub status: &'static str,
+    /// Chunk WAVs found; `0` when the chunks directory could not be read.
     pub chunk_files: usize,
     pub chunks_dir: String,
+    pub session_dir: String,
+    /// Why the session is listed.
+    pub reason: String,
     pub remedy: String,
 }
 
-/// Every non-recording session with `retention.audio = false` that still has
-/// chunk WAVs on disk: a finished session whose cleanup failed or predates the
-/// cleanup-before-stopped ordering, a `failed` one awaiting a rerun, or one
-/// still `transcribing`. `recording` sessions are excluded because their
-/// chunks are the capture in progress.
-pub fn unretained_audio_leftovers(
-    ctx: &MeetContext,
-) -> Result<Vec<UnretainedMeetingAudio>, ComlinkError> {
+/// A failure to scan the meetings store itself (not one session directory).
+#[derive(Debug, Clone, Serialize)]
+pub struct MeetingAudioScanError {
+    pub path: String,
+    pub reason: String,
+}
+
+/// The `meeting_audio` section of `privacy audit`. `clean` is true only when
+/// no session is listed and the scan hit no error.
+#[derive(Debug, Clone, Serialize)]
+pub struct MeetingAudioAudit {
+    pub clean: bool,
+    pub unretained_leftovers: Vec<UnretainedMeetingAudio>,
+    pub scan_errors: Vec<MeetingAudioScanError>,
+}
+
+/// Best-effort, conservative scan of every meeting session directory for audio
+/// that the retention policy does not keep. Never fails: a directory that
+/// cannot be read is listed (or recorded in `scan_errors`) instead of
+/// aborting the audit. Listed:
+/// - a non-`recording` session with `retention.audio = false` and chunk WAVs
+///   on disk (`stopped` after a failed cleanup or from the old ordering,
+///   `failed`, or still `transcribing`);
+/// - a `recording` session with `retention.audio = false` and chunk WAVs whose
+///   recorder is not verified running (a stale recording);
+/// - any such session whose chunks directory cannot be read;
+/// - a directory whose `session.json` is missing or unreadable but which holds
+///   chunk WAVs or an unreadable chunks directory.
+///
+/// A `recording` session whose recorder is verified running is not listed:
+/// its chunks are the capture in progress.
+pub fn meeting_audio_audit(ctx: &MeetContext) -> MeetingAudioAudit {
     let store = ctx.store();
-    let (sessions, _) = store.list_sessions()?;
     let mut leftovers = Vec::new();
-    for session in sessions {
-        if session.retention.audio || session.status == MeetingStatus::Recording {
-            continue;
+    let mut scan_errors = Vec::new();
+    let root = store.root().to_path_buf();
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return MeetingAudioAudit {
+                clean: true,
+                unretained_leftovers: leftovers,
+                scan_errors,
+            };
         }
-        let chunk_files = session_chunk_count(&store, &session)?;
-        if chunk_files == 0 {
-            continue;
+        Err(error) => {
+            scan_errors.push(MeetingAudioScanError {
+                path: root.display().to_string(),
+                reason: format!("could not list meeting sessions: {error}"),
+            });
+            return MeetingAudioAudit {
+                clean: false,
+                unretained_leftovers: leftovers,
+                scan_errors,
+            };
         }
-        leftovers.push(UnretainedMeetingAudio {
-            remedy: format!("comlink meet finalize {}", session.session_id),
-            status: session.status.as_str(),
-            chunks_dir: session.chunks_dir.clone(),
-            session_id: session.session_id,
-            chunk_files,
-        });
+    };
+
+    let mut dirs = Vec::new();
+    for entry in entries {
+        match entry.and_then(|entry| Ok((entry.file_type()?, entry.path()))) {
+            Ok((kind, path)) if kind.is_dir() => dirs.push(path),
+            Ok(_) => {}
+            Err(error) => scan_errors.push(MeetingAudioScanError {
+                path: root.display().to_string(),
+                reason: format!("could not read a meeting session entry: {error}"),
+            }),
+        }
     }
-    Ok(leftovers)
+    dirs.sort();
+
+    for dir in dirs {
+        let id = dir
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_default();
+        match store.read_session(&id) {
+            Ok(session) => {
+                if let Some(leftover) = readable_session_leftover(&store, session) {
+                    leftovers.push(leftover);
+                }
+            }
+            Err(error) => {
+                if let Some(leftover) = unreadable_session_leftover(&dir, &id, &error) {
+                    leftovers.push(leftover);
+                }
+            }
+        }
+    }
+
+    MeetingAudioAudit {
+        clean: leftovers.is_empty() && scan_errors.is_empty(),
+        unretained_leftovers: leftovers,
+        scan_errors,
+    }
+}
+
+fn readable_session_leftover(
+    store: &meet::FileMeetingStore,
+    session: MeetingSessionState,
+) -> Option<UnretainedMeetingAudio> {
+    if session.retention.audio {
+        return None;
+    }
+    let stale_recording = session.status == MeetingStatus::Recording;
+    if stale_recording && session_recorder_is_verified_running(&session) {
+        return None;
+    }
+    let (chunk_files, reason) = match session_chunk_count(store, &session) {
+        Ok(0) => return None,
+        Ok(count) if stale_recording => (
+            count,
+            "stale recording: retention.audio=false, chunk WAVs remain and the recorder is not verified running".to_string(),
+        ),
+        Ok(count) => (
+            count,
+            format!(
+                "retention.audio=false but chunk WAVs remain (status {})",
+                session.status.as_str()
+            ),
+        ),
+        Err(error) => (
+            0,
+            format!(
+                "unreadable chunks dir under {}: {error}",
+                session.chunks_dir
+            ),
+        ),
+    };
+    let remedy = if stale_recording {
+        format!("comlink meet stop {}", session.session_id)
+    } else {
+        format!("comlink meet finalize {}", session.session_id)
+    };
+    Some(UnretainedMeetingAudio {
+        status: session.status.as_str(),
+        chunks_dir: session.chunks_dir.clone(),
+        session_dir: session.session_dir.clone(),
+        session_id: session.session_id,
+        chunk_files,
+        reason,
+        remedy,
+    })
+}
+
+/// A directory whose `session.json` is missing or unreadable: its retention
+/// policy is unknown, so any chunk WAV (or an unreadable chunks dir) is listed.
+fn unreadable_session_leftover(
+    dir: &Path,
+    id: &str,
+    session_error: &ComlinkError,
+) -> Option<UnretainedMeetingAudio> {
+    let chunks_dir = dir.join("chunks");
+    let (chunk_files, reason) = match count_wavs(&chunks_dir, 2) {
+        Ok(0) => return None,
+        Ok(count) => (
+            count,
+            format!("unreadable session.json ({session_error}) and chunk WAVs remain"),
+        ),
+        Err(error) => (
+            0,
+            format!(
+                "unreadable session.json ({session_error}) and unreadable chunks dir {}: {error}",
+                chunks_dir.display()
+            ),
+        ),
+    };
+    Some(UnretainedMeetingAudio {
+        session_id: id.to_string(),
+        status: "unknown",
+        chunk_files,
+        chunks_dir: chunks_dir.display().to_string(),
+        session_dir: dir.display().to_string(),
+        reason,
+        remedy: format!(
+            "inspect {}; repair session.json or delete the chunks directory",
+            dir.display()
+        ),
+    })
+}
+
+/// Count `.wav` files in `dir` and its subdirectories down to `depth` levels
+/// (per-stream chunk dirs are one level down). A missing `dir` counts 0.
+fn count_wavs(dir: &Path, depth: usize) -> std::io::Result<usize> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error),
+    };
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let path = entry.path();
+        if kind.is_dir() && depth > 0 {
+            count += count_wavs(&path, depth - 1)?;
+        } else if kind.is_file() && path.extension().and_then(|value| value.to_str()) == Some("wav")
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 // ---------------------------------------------------------------------------

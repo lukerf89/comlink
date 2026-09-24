@@ -158,12 +158,28 @@ This command is read-only. With no id it reports the active recording session, o
 "meeting_audio": {
   "clean": false,
   "unretained_leftovers": [
-    { "session_id": "...", "status": "stopped", "chunk_files": 2, "chunks_dir": "...", "remedy": "comlink meet finalize <id>" }
-  ]
+    {
+      "session_id": "...",
+      "status": "stopped",
+      "chunk_files": 2,
+      "chunks_dir": "...",
+      "session_dir": "...",
+      "reason": "retention.audio=false but chunk WAVs remain (status stopped)",
+      "remedy": "comlink meet finalize <id>"
+    }
+  ],
+  "scan_errors": [ { "path": "...", "reason": "..." } ]
 }
 ```
 
-`unretained_leftovers` lists every non-`recording` meeting whose `retention.audio` is `false` but whose chunk WAVs are still on disk (`stopped`, `failed`, or still `transcribing`). `clean` is `true` only when that list is empty. `--format text` prints `meeting_audio: clean=<bool> unretained_leftovers=<n>` plus one `meeting_audio_leftover:` line per session.
+The scan is conservative and best-effort. `unretained_leftovers` lists:
+
+- every non-`recording` meeting whose `retention.audio` is `false` but whose chunk WAVs are still on disk (`stopped`, `failed`, or still `transcribing`); remedy `comlink meet finalize <id>`;
+- every `recording` meeting whose `retention.audio` is `false`, whose chunk WAVs are on disk, and whose recorder is not verified running (a stale recording); remedy `comlink meet stop <id>`. A recording whose recorder is verified running is not listed;
+- any such meeting whose chunks directory cannot be read (`chunk_files` is `0`, and `reason` names the directory);
+- any session directory whose `session.json` is missing or unreadable but which holds chunk WAVs (searched two levels deep under `<session_dir>/chunks`) or whose chunks directory cannot be read. Its retention policy is unknown, so `status` is `unknown`, `session_id` is the directory name, and `remedy` names the directory.
+
+A directory that cannot be read never fails the audit. A failure to list the meetings store itself is recorded in `scan_errors`. `clean` is `true` only when both lists are empty. `session_dir`, `reason` and `scan_errors` were added in the LF-161 micro-round (additive). `--format text` prints `meeting_audio: clean=<bool> unretained_leftovers=<n> scan_errors=<n>`, then one `meeting_audio_leftover:` line per entry (ending in `reason=...`) and one `meeting_audio_scan_error:` line per scan error.
 
 ### Meeting exit codes
 
@@ -171,7 +187,8 @@ The codes in the table below are unchanged. The meeting-specific cases are:
 
 - `meet status` exits `0` for any readable state, including `none`. An unknown session id exits `1`.
 - `meet status` exits `1` (`meeting session <id> is unreadable ...`) when the session it would report has a `session.json` that exists but cannot be read or parsed: the named session, the active session, or, for a bare `meet status` with no recording or `transcribing` session, any session in the store. It never reports `none` in that case. A directory without a `session.json` is not a session and is ignored.
-- `meet finalize` exits `1` when the unretained chunk cleanup fails; the session is left `failed`, not `stopped`.
+- `meet finalize`, and a synchronous `meet stop`, exit `1` when the unretained chunk cleanup fails. The error names the chunks directory. The session is left `failed`, not `stopped`, with its exports on disk, and `meet finalize <id>` recovers from the export without re-running ASR, retries the delete and commits `stopped`. A successful `meet stop` prints the same output as before.
+- `meet finalize` on a `stopped` session transcribes the chunks only when no JSON export exists at all (a synchronous stop whose ASR failed). If a JSON export exists but does not validate (for example, it was edited), `meet finalize` exits `1` with `meeting export is not available: ...` and leaves the export, the chunks and the session unchanged.
 - `meet export` with no id exits `1` when the newest non-recording session is still `transcribing` or its finalize `failed`, instead of exporting an older meeting. The error names the session and the `meet status <id>` command.
 - Another comlink process holding the session's lifecycle lock exits `1` (`meeting session is busy`).
 - A detached finalizer that cannot be launched exits `1`, and the session is marked `failed`.

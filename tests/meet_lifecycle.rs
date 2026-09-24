@@ -1116,6 +1116,67 @@ fn privacy_audit_flags_leftover_meeting_audio_until_finalize_cleans_it() {
     assert_eq!(audit(&runtime)["meeting_audio"]["clean"], true);
 }
 
+#[test]
+fn privacy_audit_survives_unreadable_meeting_dirs_and_names_them() {
+    let runtime = MockRuntime::new();
+    let start_json = start_meeting(&runtime, 2);
+    let id = start_json["session_id"].as_str().unwrap();
+    assert_success(&runtime.run(&["meet", "stop", id, "--format", "json"], 2, ""));
+    let chunks_dir = PathBuf::from(start_json["chunks_dir"].as_str().unwrap());
+    let meetings_root = chunks_dir.parent().unwrap().parent().unwrap().to_path_buf();
+
+    // A corrupt session.json whose chunk WAVs remain.
+    let corrupt = meetings_root.join("corrupt-session");
+    fs::create_dir_all(corrupt.join("chunks")).unwrap();
+    fs::write(corrupt.join("session.json"), "{").unwrap();
+    fs::write(corrupt.join("chunks/chunk-00000.wav"), "leftover").unwrap();
+    // An unreadable chunks dir on the stopped session.
+    fs::create_dir_all(&chunks_dir).unwrap();
+    fs::set_permissions(&chunks_dir, fs::Permissions::from_mode(0o000)).unwrap();
+    let output = runtime.run(&["privacy", "audit", "--format", "json"], 0, "");
+    let text = runtime.run(&["privacy", "audit"], 0, "");
+    fs::set_permissions(&chunks_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_success(&output);
+    let audit = json_stdout(&output);
+    assert_eq!(audit["meeting_audio"]["clean"], false);
+    let leftovers = audit["meeting_audio"]["unretained_leftovers"]
+        .as_array()
+        .unwrap();
+    assert_eq!(leftovers.len(), 2, "{leftovers:?}");
+    let unreadable = leftovers
+        .iter()
+        .find(|entry| entry["session_id"] == id)
+        .unwrap();
+    let chunks_text = chunks_dir.display().to_string();
+    assert!(
+        unreadable["reason"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("unreadable chunks dir under {chunks_text}")),
+        "{unreadable}"
+    );
+    let corrupt_entry = leftovers
+        .iter()
+        .find(|entry| entry["session_id"] == "corrupt-session")
+        .unwrap();
+    assert_eq!(corrupt_entry["status"], "unknown");
+    assert_eq!(corrupt_entry["chunk_files"], 1);
+    assert_eq!(corrupt_entry["session_dir"], corrupt.display().to_string());
+    assert!(corrupt_entry["reason"]
+        .as_str()
+        .unwrap()
+        .contains("unreadable session.json"));
+
+    assert_success(&text);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("meeting_audio: clean=false unretained_leftovers=2 scan_errors=0"),
+        "{text}"
+    );
+    assert!(text.contains(&chunks_text), "{text}");
+}
+
 /// Golden regression for the byte-level CLI contract of `meet start`, `meet
 /// stop`, and `meet export`. The fixtures under `tests/fixtures/meet/` were
 /// captured from the pre-refactor revision (97988d2) with:

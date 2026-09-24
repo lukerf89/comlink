@@ -650,7 +650,7 @@ fn finalize_cleanup_failure_is_not_stopped_and_rerun_cleans_up() {
     assert_eq!(wav_count(&session.chunks_dir), 2, "audio is still on disk");
     // Exports were written before the cleanup was attempted.
     assert!(store.validate_export_for_recovery(&session).is_ok());
-    let leftovers = meet_service::unretained_audio_leftovers(&ctx).unwrap();
+    let leftovers = meet_service::meeting_audio_audit(&ctx).unretained_leftovers;
     assert_eq!(leftovers.len(), 1);
     assert_eq!(leftovers[0].session_id, id);
     assert_eq!(leftovers[0].status, "failed");
@@ -669,9 +669,7 @@ fn finalize_cleanup_failure_is_not_stopped_and_rerun_cleans_up() {
     let stopped = store.read_session(&id).unwrap();
     assert_eq!(stopped.status, MeetingStatus::Stopped);
     assert!(stopped.error.is_none());
-    assert!(meet_service::unretained_audio_leftovers(&ctx)
-        .unwrap()
-        .is_empty());
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
 }
 
 #[test]
@@ -685,7 +683,7 @@ fn stopped_session_with_leftover_chunks_is_cleaned_by_finalize() {
     assert_eq!(session.status, MeetingStatus::Stopped);
     plant_leftover_chunks(&session);
 
-    let leftovers = meet_service::unretained_audio_leftovers(&ctx).unwrap();
+    let leftovers = meet_service::meeting_audio_audit(&ctx).unretained_leftovers;
     assert_eq!(leftovers.len(), 1);
     assert_eq!(leftovers[0].status, "stopped");
     assert!(leftovers[0].remedy.contains(&format!("meet finalize {id}")));
@@ -708,9 +706,7 @@ fn stopped_session_with_leftover_chunks_is_cleaned_by_finalize() {
     assert_eq!(status.status, "stopped");
     assert!(!Path::new(&session.chunks_dir).exists());
     assert_eq!(harness.whisper_invocations(), 2);
-    assert!(meet_service::unretained_audio_leftovers(&ctx)
-        .unwrap()
-        .is_empty());
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
 
     // A stopped session with leftovers and a healthy disk: the fast path
     // regenerates a missing Markdown export from the JSON, then deletes the
@@ -750,9 +746,7 @@ fn retained_audio_is_never_deleted_by_finalize() {
     revert_to_transcribing(&harness, &id);
     meet_service::finalize(&ctx, &id, Duration::from_secs(1)).unwrap();
     assert_eq!(wav_count(&session.chunks_dir), 2);
-    assert!(meet_service::unretained_audio_leftovers(&ctx)
-        .unwrap()
-        .is_empty());
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
 }
 
 #[test]
@@ -883,7 +877,7 @@ fn sync_stop_asr_failure_leaves_stopped_without_exports_and_finalize_recovers() 
         "none",
         "known limitation: bare status does not surface it"
     );
-    let leftovers = meet_service::unretained_audio_leftovers(&ctx).unwrap();
+    let leftovers = meet_service::meeting_audio_audit(&ctx).unretained_leftovers;
     assert_eq!(leftovers.len(), 1, "privacy audit sees the kept audio");
 
     // finalize transcribes it; a failure there marks it failed.
@@ -1056,4 +1050,246 @@ fn process_launcher_reaps_the_finalizer_so_no_zombie_remains() {
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+}
+
+// ---------------------------------------------------------------------------
+// LF-161 micro-round
+// ---------------------------------------------------------------------------
+
+#[test]
+fn meeting_audio_audit_names_a_corrupt_session_that_still_holds_chunks() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let store = harness.store();
+    fs::create_dir_all(store.root()).unwrap();
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
+
+    // No session.json and no chunks: not a session, nothing to report.
+    fs::create_dir_all(store.root().join("empty-dir")).unwrap();
+    // Corrupt session.json with no chunks: no audio, nothing to report.
+    let no_audio = store.root().join("corrupt-no-audio");
+    fs::create_dir_all(&no_audio).unwrap();
+    fs::write(no_audio.join("session.json"), "{").unwrap();
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
+
+    // Corrupt session.json with chunk WAVs (one in a per-stream subdir).
+    let corrupt = store.root().join("corrupt");
+    fs::create_dir_all(corrupt.join("chunks/system")).unwrap();
+    fs::write(corrupt.join("session.json"), "{").unwrap();
+    fs::write(corrupt.join("chunks/chunk-00000.wav"), "leftover").unwrap();
+    fs::write(corrupt.join("chunks/system/chunk-00000.wav"), "leftover").unwrap();
+
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    assert!(!audit.clean);
+    assert!(audit.scan_errors.is_empty());
+    assert_eq!(audit.unretained_leftovers.len(), 1, "{audit:?}");
+    let entry = &audit.unretained_leftovers[0];
+    assert_eq!(entry.session_id, "corrupt");
+    assert_eq!(entry.status, "unknown");
+    assert_eq!(entry.chunk_files, 2);
+    assert_eq!(entry.session_dir, corrupt.display().to_string());
+    assert!(
+        entry.reason.contains("unreadable session.json"),
+        "{entry:?}"
+    );
+    assert!(entry.remedy.contains(&corrupt.display().to_string()));
+}
+
+#[test]
+fn meeting_audio_audit_survives_an_unreadable_chunks_dir_and_names_it() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let store = harness.store();
+    let id = harness.transcribing_session();
+    meet_service::finalize(&ctx, &id, Duration::from_secs(1)).unwrap();
+    let session = store.read_session(&id).unwrap();
+    plant_leftover_chunks(&session);
+    // A second, healthy leftover proves one bad dir does not hide the others.
+    let other = constructed_session(&store, "other-failed");
+    let mut other_failed = other.clone();
+    other_failed.mark_failed("mock");
+    store.save_session(&other_failed).unwrap();
+    plant_leftover_chunks(&other);
+
+    set_mode(&session.chunks_dir, 0o000);
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    set_mode(&session.chunks_dir, 0o755);
+
+    assert!(!audit.clean);
+    assert_eq!(audit.unretained_leftovers.len(), 2, "{audit:?}");
+    let entry = audit
+        .unretained_leftovers
+        .iter()
+        .find(|entry| entry.session_id == id)
+        .unwrap();
+    assert_eq!(entry.status, "stopped");
+    assert!(entry.reason.contains("unreadable chunks dir"), "{entry:?}");
+    assert!(entry.reason.contains(&session.chunks_dir), "{entry:?}");
+    assert_eq!(entry.chunks_dir, session.chunks_dir);
+    let other_entry = audit
+        .unretained_leftovers
+        .iter()
+        .find(|entry| entry.session_id == "other-failed")
+        .unwrap();
+    assert_eq!(other_entry.status, "failed");
+    assert_eq!(other_entry.chunk_files, 2);
+}
+
+#[test]
+fn meeting_audio_audit_flags_stale_recordings_but_not_live_ones() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let store = harness.store();
+
+    // Live: the mock recorder is running and verified.
+    let live = harness.start(&ctx, 2);
+    let live_session = store.read_session(&live.session_id).unwrap();
+    assert!(meet_service::session_recorder_is_verified_running(
+        &live_session
+    ));
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    assert!(audit.clean, "live recording flagged: {audit:?}");
+    meet_service::stop(&ctx, Some(live.session_id.clone()), STOP_WAIT).unwrap();
+
+    // Stale: `recording` with chunks and no recorder running.
+    let stale = constructed_session(&store, "stale-recording");
+    assert_eq!(stale.status, MeetingStatus::Recording);
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    assert!(
+        audit.clean,
+        "a stale recording without chunks holds no audio"
+    );
+    plant_leftover_chunks(&stale);
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    assert!(!audit.clean);
+    assert_eq!(audit.unretained_leftovers.len(), 1, "{audit:?}");
+    let entry = &audit.unretained_leftovers[0];
+    assert_eq!(entry.session_id, "stale-recording");
+    assert_eq!(entry.status, "recording");
+    assert_eq!(entry.chunk_files, 2);
+    assert!(entry.reason.contains("stale recording"), "{entry:?}");
+    assert_eq!(entry.remedy, "comlink meet stop stale-recording");
+}
+
+#[test]
+fn meeting_audio_audit_records_an_unreadable_store_root_instead_of_failing() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let store = harness.store();
+    // No store yet: clean.
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
+    fs::create_dir_all(store.root()).unwrap();
+    let root = store.root().display().to_string();
+    set_mode(&root, 0o000);
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    set_mode(&root, 0o755);
+    assert!(!audit.clean);
+    assert_eq!(audit.scan_errors.len(), 1, "{audit:?}");
+    assert_eq!(audit.scan_errors[0].path, root);
+}
+
+#[test]
+fn sync_stop_cleanup_failure_is_failed_and_finalize_finishes_it() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let started = harness.start(&ctx, 2);
+    let store = harness.store();
+
+    // Read-only chunks dir: ASR can read the WAVs but they cannot be unlinked.
+    set_mode(&started.chunks_dir, 0o555);
+    let error = meet_service::stop(&ctx, None, STOP_WAIT).unwrap_err();
+    set_mode(&started.chunks_dir, 0o755);
+    assert!(
+        matches!(&error, ComlinkError::MeetingChunkCleanupFailed { id, .. } if id == &started.session_id),
+        "{error}"
+    );
+    assert_eq!(error.exit_code(), 1);
+    // M3a: the reason names the chunks dir.
+    assert!(error.to_string().contains(&started.chunks_dir), "{error}");
+
+    let session = store.read_session(&started.session_id).unwrap();
+    assert_eq!(session.status, MeetingStatus::Failed, "must not be stopped");
+    assert!(
+        session.error.as_deref().unwrap().contains("cleanup"),
+        "{:?}",
+        session.error
+    );
+    assert_eq!(session.chunks_processed, Some(2));
+    assert_eq!(wav_count(&session.chunks_dir), 2, "audio is still on disk");
+    assert!(store.validate_export_for_recovery(&session).is_ok());
+    assert!(store.active_session_id().unwrap().is_none());
+    assert!(!meet_service::meeting_audio_audit(&ctx).clean);
+
+    let status = meet_service::finalize(&ctx, &started.session_id, Duration::from_secs(1)).unwrap();
+    assert_eq!(status.status, "stopped");
+    assert_eq!(status.chunks_processed, 2);
+    assert_eq!(
+        harness.whisper_invocations(),
+        2,
+        "finalize must not re-run ASR"
+    );
+    assert!(!Path::new(&session.chunks_dir).exists(), "audio is gone");
+    let stopped = store.read_session(&started.session_id).unwrap();
+    assert_eq!(stopped.status, MeetingStatus::Stopped);
+    assert!(stopped.error.is_none());
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
+}
+
+#[test]
+fn launch_failure_logs_an_active_pointer_clear_failure() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(FailingLauncher));
+    let started = harness.start(&ctx, 2);
+    let store = harness.store();
+    let root = store.root().display().to_string();
+
+    // Read-only store root: the active-session pointer cannot be removed.
+    set_mode(&root, 0o555);
+    let error = meet_service::stop_detached(&ctx, None, STOP_WAIT).unwrap_err();
+    set_mode(&root, 0o755);
+    assert!(
+        matches!(error, ComlinkError::MeetingFinalizeLaunchFailed(_)),
+        "{error}"
+    );
+    let session = store.read_session(&started.session_id).unwrap();
+    assert_eq!(session.status, MeetingStatus::Failed);
+    let log = fs::read_to_string(meet_service::finalize_log_path(&session)).unwrap();
+    assert!(
+        log.contains("could not clear the active-session pointer")
+            && log.contains(&started.session_id),
+        "{log}"
+    );
+}
+
+#[test]
+fn finalize_never_overwrites_an_invalid_export_on_a_stopped_session() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let started = harness.start(&ctx, 2);
+    meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+    let store = harness.store();
+    let session = store.read_session(&started.session_id).unwrap();
+    assert_eq!(harness.whisper_invocations(), 2);
+
+    // A user-edited (now invalid) export, with chunks back on disk.
+    let edited = "{\"edited\": \"by the user\"}";
+    fs::write(&session.json_export_path, edited).unwrap();
+    plant_leftover_chunks(&session);
+
+    let error =
+        meet_service::finalize(&ctx, &started.session_id, Duration::from_secs(1)).unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingExportUnavailable(_)),
+        "{error}"
+    );
+    assert_eq!(harness.whisper_invocations(), 2, "ASR must not re-run");
+    assert_eq!(
+        fs::read_to_string(&session.json_export_path).unwrap(),
+        edited
+    );
+    assert_eq!(
+        store.read_session(&started.session_id).unwrap().status,
+        MeetingStatus::Stopped
+    );
+    assert_eq!(wav_count(&session.chunks_dir), 2);
 }
