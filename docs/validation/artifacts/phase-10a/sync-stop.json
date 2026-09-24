@@ -1,8 +1,8 @@
 {
   "schema_version": "comlink.meeting.v1",
-  "session_id": "s1790235403728668000-17191-0",
+  "session_id": "s1790235820162773000-55719-0",
   "status": "stopped",
-  "elapsed_ms": 472,
+  "elapsed_ms": 546,
   "duration_ms": 60000,
   "chunks_processed": 2,
   "segment_count": 2,
@@ -26,10 +26,10 @@
     "detail": "ASR did not expose VAD segment timing; Comlink used capture chunk boundaries"
   },
   "artifacts": {
-    "session_dir": "<tmp>/comlink-data/meetings/s1790235403728668000-17191-0",
-    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790235403728668000-17191-0/segments.jsonl",
-    "json_export": "<tmp>/comlink-data/meetings/s1790235403728668000-17191-0/transcript.json",
-    "markdown_export": "<tmp>/comlink-data/meetings/s1790235403728668000-17191-0/transcript.md",
+    "session_dir": "<tmp>/comlink-data/meetings/s1790235820162773000-55719-0",
+    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790235820162773000-55719-0/segments.jsonl",
+    "json_export": "<tmp>/comlink-data/meetings/s1790235820162773000-55719-0/transcript.json",
+    "markdown_export": "<tmp>/comlink-data/meetings/s1790235820162773000-55719-0/transcript.md",
     "chunks_dir": null
   },
   "warnings": [],

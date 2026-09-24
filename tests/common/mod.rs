@@ -40,8 +40,8 @@ pub struct MockOptions {
     /// Write the real `tests/fixtures/audio/silence.wav` as every chunk, so
     /// the near-silent capture warning fires (whisper still returns text).
     pub silent: bool,
-    /// The mock recorder starts a long-lived recording child (it ignores
-    /// SIGINT as a background job) and writes its pid to
+    /// The mock recorder starts a long-lived non-capture child (`sleep`,
+    /// which ignores SIGINT as a background job) and writes its pid to
     /// `<harness root>/descendant.pid`, like a wrapper that does not `exec`.
     pub spawn_descendant: bool,
     /// The mock recorder starts a child whose command line carries the chunk
@@ -95,9 +95,9 @@ case " $* " in
 esac
 out="${{@: -1}}"
 if [ -n "{descendant}" ]; then
-  # Recording child (the chunk pattern is an argument) that, as a background
-  # job, ignores SIGINT: only a later signal round stops it.
-  bash -c 'while true; do sleep 0.2; done' comlink-descendant "$out" &
+  # A non-capture child (no chunk pattern) that, as a background job,
+  # ignores SIGINT: only a later signal round stops it.
+  sleep 300 &
   echo "$!" > "{descendant}"
 fi
 if [ -n "{capture_descendant}" ]; then

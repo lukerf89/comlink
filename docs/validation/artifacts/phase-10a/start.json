@@ -1,16 +1,16 @@
 {
   "schema_version": "comlink.meeting.v1",
-  "session_id": "s1790235402546986000-17043-0",
+  "session_id": "s1790235818929816000-55488-0",
   "status": "recording",
-  "elapsed_ms": 128,
-  "recorder_pid": 17044,
+  "elapsed_ms": 133,
+  "recorder_pid": 55489,
   "recorders": [
     {
       "source_label": "user_mic",
       "device": ":0",
-      "pid": 17044,
-      "chunks_dir": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/chunks",
-      "stderr_path": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/capture.stderr"
+      "pid": 55489,
+      "chunks_dir": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/chunks",
+      "stderr_path": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/capture.stderr"
     }
   ],
   "source": {
@@ -19,22 +19,22 @@
       {
         "label": "user_mic",
         "device": ":0",
-        "chunks_dir": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/chunks",
-        "recorder_stderr_path": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/capture.stderr",
-        "recorder_pid": 17044,
+        "chunks_dir": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/chunks",
+        "recorder_stderr_path": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/capture.stderr",
+        "recorder_pid": 55489,
         "recorder_identity": {
-          "pid": 17044,
-          "output_pattern": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/chunks/chunk-%05d.wav",
-          "process_started_at": "Thu Sep 24 02:36:42 2026"
+          "pid": 55489,
+          "output_pattern": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/chunks/chunk-%05d.wav",
+          "process_started_at": "Thu Sep 24 02:43:38 2026"
         }
       }
     ]
   },
-  "session_dir": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0",
-  "chunks_dir": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/chunks",
-  "segments_jsonl": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/segments.jsonl",
-  "json_export": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/transcript.json",
-  "markdown_export": "<tmp>/comlink-data/meetings/s1790235402546986000-17043-0/transcript.md",
+  "session_dir": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0",
+  "chunks_dir": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/chunks",
+  "segments_jsonl": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/segments.jsonl",
+  "json_export": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/transcript.json",
+  "markdown_export": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/transcript.md",
   "consent_reminder": "Consent reminder: confirm everyone present knows this meeting is being recorded and transcribed.",
   "inactivity_auto_stop": {
     "enabled": false,
