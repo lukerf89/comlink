@@ -1,0 +1,60 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "Consent reminder: confirm everyone present knows this meeting is being recorded and transcribed."
+    },
+    {
+      "type": "text",
+      "text": "Recording meeting s1790233071990312000-80424-0. Call meeting_stop to stop, then poll meeting_status until `stopped`."
+    },
+    {
+      "type": "text",
+      "text": "{\n  \"chunks_dir\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/chunks\",\n  \"consent_reminder\": \"Consent reminder: confirm everyone present knows this meeting is being recorded and transcribed.\",\n  \"elapsed_ms\": 130,\n  \"inactivity_auto_stop\": {\n    \"enabled\": false,\n    \"reason\": \"not enabled in Phase 7; the current capture adapter has no reliable realtime silence signal\"\n  },\n  \"json_export\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/transcript.json\",\n  \"markdown_export\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/transcript.md\",\n  \"recorder_pid\": 80443,\n  \"recorders\": [\n    {\n      \"chunks_dir\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/chunks\",\n      \"device\": \":0\",\n      \"pid\": 80443,\n      \"source_label\": \"user_mic\",\n      \"stderr_path\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/capture.stderr\"\n    }\n  ],\n  \"schema_version\": \"comlink.meeting.v1\",\n  \"segments_jsonl\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/segments.jsonl\",\n  \"session_dir\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0\",\n  \"session_id\": \"s1790233071990312000-80424-0\",\n  \"source\": {\n    \"mode\": \"mic-only\",\n    \"streams\": [\n      {\n        \"chunks_dir\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/chunks\",\n        \"device\": \":0\",\n        \"label\": \"user_mic\",\n        \"recorder_identity\": {\n          \"output_pattern\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/chunks/chunk-%05d.wav\",\n          \"pid\": 80443,\n          \"process_started_at\": \"Thu Sep 24 01:57:52 2026\"\n        },\n        \"recorder_pid\": 80443,\n        \"recorder_stderr_path\": \"<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/capture.stderr\"\n      }\n    ]\n  },\n  \"status\": \"recording\"\n}"
+    }
+  ],
+  "structuredContent": {
+    "chunks_dir": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/chunks",
+    "consent_reminder": "Consent reminder: confirm everyone present knows this meeting is being recorded and transcribed.",
+    "elapsed_ms": 130,
+    "inactivity_auto_stop": {
+      "enabled": false,
+      "reason": "not enabled in Phase 7; the current capture adapter has no reliable realtime silence signal"
+    },
+    "json_export": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/transcript.json",
+    "markdown_export": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/transcript.md",
+    "recorder_pid": 80443,
+    "recorders": [
+      {
+        "chunks_dir": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/chunks",
+        "device": ":0",
+        "pid": 80443,
+        "source_label": "user_mic",
+        "stderr_path": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/capture.stderr"
+      }
+    ],
+    "schema_version": "comlink.meeting.v1",
+    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/segments.jsonl",
+    "session_dir": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0",
+    "session_id": "s1790233071990312000-80424-0",
+    "source": {
+      "mode": "mic-only",
+      "streams": [
+        {
+          "chunks_dir": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/chunks",
+          "device": ":0",
+          "label": "user_mic",
+          "recorder_identity": {
+            "output_pattern": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/chunks/chunk-%05d.wav",
+            "pid": 80443,
+            "process_started_at": "Thu Sep 24 01:57:52 2026"
+          },
+          "recorder_pid": 80443,
+          "recorder_stderr_path": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/capture.stderr"
+        }
+      ]
+    },
+    "status": "recording"
+  },
+  "isError": false
+}

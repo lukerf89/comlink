@@ -113,6 +113,20 @@ pub struct StyleProfile {
     pub examples: Vec<StyleExample>,
 }
 
+/// Local stdio MCP server (`comlink mcp`) settings.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpConfig {
+    /// Allow MCP clients to start a meeting recording. Off by default: an
+    /// agent must not be able to turn on the microphone until the user opts
+    /// in with `comlink config set mcp.allow_start true`.
+    #[serde(default)]
+    pub allow_start: bool,
+}
+
+/// The only key `comlink config set` accepts.
+pub const MCP_ALLOW_START_KEY: &str = "mcp.allow_start";
+pub const MCP_ALLOW_START_ENV: &str = "COMLINK_MCP_ALLOW_START";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub history_enabled: bool,
@@ -124,6 +138,8 @@ pub struct Config {
     pub modes: Vec<ModeEntry>,
     pub style_profiles: Vec<StyleProfile>,
     pub llm: LocalLlmConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 impl Default for Config {
@@ -138,6 +154,7 @@ impl Default for Config {
             modes: Vec::new(),
             style_profiles: Vec::new(),
             llm: LocalLlmConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 }
@@ -174,6 +191,12 @@ struct FileConfig {
     modes: Option<Vec<ModeEntry>>,
     style_profiles: Option<Vec<StyleProfile>>,
     llm: Option<FileLocalLlmConfig>,
+    mcp: Option<FileMcpConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FileMcpConfig {
+    allow_start: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -239,8 +262,55 @@ pub fn save(paths: &ConfigPaths, config: &Config) -> Result<(), ComlinkError> {
     remove_runtime_models(&mut to_write);
     mark_selected_model(&mut to_write);
     let bytes = serde_json::to_vec_pretty(&to_write)?;
-    fs::write(&paths.config_file, bytes)?;
-    Ok(())
+    // Atomic: a long-lived `comlink mcp` re-reads this file on every call and
+    // must never observe a half-written config.
+    crate::storage::write_atomic(&paths.config_file, &bytes)
+}
+
+/// Result of `comlink config set`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigSetOutcome {
+    pub key: &'static str,
+    pub value: bool,
+    pub config_file: PathBuf,
+    /// Set when `COMLINK_MCP_ALLOW_START` is present and disagrees with the
+    /// saved value, so the caller can warn that the env var wins.
+    pub env_override: Option<String>,
+}
+
+/// Parse a `config set` boolean. Same spellings as the boolean env vars.
+pub fn parse_bool_value(name: &'static str, value: &str) -> Result<bool, ComlinkError> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        other => Err(ComlinkError::InvalidConfigValue {
+            name,
+            value: other.to_string(),
+        }),
+    }
+}
+
+/// `comlink config set <key> <value>`. Only `mcp.allow_start` is settable.
+/// Reads the persistent file config only (never env), changes that one key and
+/// saves atomically, so unrelated keys survive and env values are never
+/// written to disk.
+pub fn set_key(key: &str, value: &str) -> Result<ConfigSetOutcome, ComlinkError> {
+    if key != MCP_ALLOW_START_KEY {
+        return Err(ComlinkError::UnknownConfigKey(key.to_string()));
+    }
+    let value = parse_bool_value(MCP_ALLOW_START_KEY, value)?;
+    let mut resolved = load_persistent()?;
+    resolved.config.mcp.allow_start = value;
+    save(&resolved.paths, &resolved.config)?;
+    let env_override = env::var(MCP_ALLOW_START_ENV)
+        .ok()
+        .filter(|raw| parse_bool_value(MCP_ALLOW_START_ENV, raw).ok() != Some(value));
+    Ok(ConfigSetOutcome {
+        key: MCP_ALLOW_START_KEY,
+        value,
+        config_file: resolved.paths.config_file,
+        env_override,
+    })
 }
 
 pub fn print(resolved: &ResolvedConfig, format: ConfigFormat) -> Result<(), ComlinkError> {
@@ -267,6 +337,7 @@ pub fn print(resolved: &ResolvedConfig, format: ConfigFormat) -> Result<(), Coml
                     .as_deref()
                     .unwrap_or("<none>")
             );
+            println!("mcp: allow_start={}", resolved.config.mcp.allow_start);
             println!("sources: {}", resolved.sources.join(", "));
         }
     }
@@ -505,6 +576,9 @@ fn merge_file_config(config: &mut Config, file: FileConfig) {
     if let Some(llm) = file.llm {
         merge_file_llm_config(&mut config.llm, llm);
     }
+    if let Some(value) = file.mcp.and_then(|mcp| mcp.allow_start) {
+        config.mcp.allow_start = value;
+    }
 }
 
 fn merge_env(config: &mut Config, sources: &mut Vec<String>) -> Result<(), ComlinkError> {
@@ -544,6 +618,10 @@ fn merge_env(config: &mut Config, sources: &mut Vec<String>) -> Result<(), Comli
     if let Ok(value) = env::var("COMLINK_LLM_MODEL") {
         config.llm.model = Some(value);
         sources.push("COMLINK_LLM_MODEL".to_string());
+    }
+    if let Some(value) = bool_env(MCP_ALLOW_START_ENV)? {
+        config.mcp.allow_start = value;
+        sources.push(MCP_ALLOW_START_ENV.to_string());
     }
     Ok(())
 }
@@ -884,6 +962,175 @@ mod tests {
         };
 
         assert_eq!(selected_model_path(&config), None);
+    }
+
+    /// Run `body` with `COMLINK_HOME` pointed at a fresh dir and the MCP env
+    /// var set to `mcp_env` (or unset), restoring both afterwards.
+    fn with_isolated_home<T>(mcp_env: Option<&str>, body: impl FnOnce(&Path) -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let previous_home = env::var_os("COMLINK_HOME");
+        let previous_mcp = env::var_os(MCP_ALLOW_START_ENV);
+        env::set_var("COMLINK_HOME", dir.path());
+        match mcp_env {
+            Some(value) => env::set_var(MCP_ALLOW_START_ENV, value),
+            None => env::remove_var(MCP_ALLOW_START_ENV),
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(dir.path())));
+        restore_env("COMLINK_HOME", previous_home);
+        restore_env(MCP_ALLOW_START_ENV, previous_mcp);
+        match result {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    #[test]
+    fn mcp_allow_start_defaults_false_then_file_then_env_wins() {
+        with_isolated_home(None, |home| {
+            assert!(
+                !load(CliConfigOverrides::default())
+                    .unwrap()
+                    .config
+                    .mcp
+                    .allow_start
+            );
+            fs::write(home.join("config.json"), r#"{"mcp":{"allow_start":true}}"#).unwrap();
+            assert!(
+                load(CliConfigOverrides::default())
+                    .unwrap()
+                    .config
+                    .mcp
+                    .allow_start
+            );
+        });
+        with_isolated_home(Some("false"), |home| {
+            fs::write(home.join("config.json"), r#"{"mcp":{"allow_start":true}}"#).unwrap();
+            let resolved = load(CliConfigOverrides::default()).unwrap();
+            assert!(!resolved.config.mcp.allow_start, "env overrides file");
+            assert!(resolved.sources.contains(&MCP_ALLOW_START_ENV.to_string()));
+            // The persistent view ignores env.
+            assert!(load_persistent().unwrap().config.mcp.allow_start);
+        });
+        with_isolated_home(Some("1"), |_| {
+            assert!(
+                load(CliConfigOverrides::default())
+                    .unwrap()
+                    .config
+                    .mcp
+                    .allow_start
+            );
+        });
+    }
+
+    #[test]
+    fn mcp_allow_start_env_rejects_non_boolean() {
+        with_isolated_home(Some("sometimes"), |_| {
+            let error = load(CliConfigOverrides::default()).unwrap_err();
+            assert!(matches!(
+                error,
+                ComlinkError::InvalidConfigValue { name, .. } if name == MCP_ALLOW_START_ENV
+            ));
+        });
+    }
+
+    #[test]
+    fn config_set_changes_only_allow_start_and_never_persists_env() {
+        with_isolated_home(Some("true"), |home| {
+            let file = home.join("config.json");
+            fs::write(
+                &file,
+                r#"{
+                  "history_enabled": false,
+                  "selected_model": "base",
+                  "models": [{"name": "base", "path": "/tmp/base.bin"}],
+                  "vocabulary": [{"phrase": "super base", "replacement": "Supabase"}],
+                  "modes": [{"name": "standup", "deterministic_mode": "memo"}]
+                }"#,
+            )
+            .unwrap();
+            env::set_var("COMLINK_RETAIN_AUDIO", "true");
+
+            let outcome = set_key("mcp.allow_start", "false").unwrap();
+            env::remove_var("COMLINK_RETAIN_AUDIO");
+
+            assert_eq!(outcome.key, "mcp.allow_start");
+            assert!(!outcome.value);
+            assert_eq!(outcome.config_file, file);
+            assert_eq!(outcome.env_override.as_deref(), Some("true"));
+
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+            assert_eq!(saved["mcp"]["allow_start"], false);
+            assert_eq!(saved["history_enabled"], false);
+            assert_eq!(saved["selected_model"], "base");
+            assert_eq!(saved["models"][0]["path"], "/tmp/base.bin");
+            assert_eq!(saved["vocabulary"][0]["replacement"], "Supabase");
+            assert_eq!(saved["modes"][0]["name"], "standup");
+            // Env-derived values never reach disk.
+            assert_eq!(saved["retention"]["audio"], false);
+
+            let outcome = set_key("mcp.allow_start", "true").unwrap();
+            assert!(outcome.value);
+            assert_eq!(outcome.env_override, None, "env agrees with the new value");
+            assert!(load_persistent().unwrap().config.mcp.allow_start);
+        });
+    }
+
+    #[test]
+    fn config_set_rejects_unknown_keys_and_bad_booleans_without_writing() {
+        with_isolated_home(None, |home| {
+            let error = set_key("retention.audio", "true").unwrap_err();
+            assert!(
+                matches!(error, ComlinkError::UnknownConfigKey(ref key) if key == "retention.audio")
+            );
+            let error = set_key("mcp.allow_start", "maybe").unwrap_err();
+            assert!(matches!(error, ComlinkError::InvalidConfigValue { .. }));
+            assert!(!home.join("config.json").exists());
+        });
+    }
+
+    #[test]
+    fn concurrent_reloads_never_see_a_partial_config_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = ConfigPaths {
+            home_dir: dir.path().to_path_buf(),
+            config_file: dir.path().join("config.json"),
+            data_dir: dir.path().join("data"),
+            database_file: dir.path().join("data/history.sqlite3"),
+            audio_dir: dir.path().join("data/audio"),
+        };
+        let mut config = Config::default();
+        // Big enough that a non-atomic write is observable mid-way.
+        for index in 0..400 {
+            config.vocabulary.push(VocabularyEntry {
+                phrase: format!("phrase number {index}"),
+                replacement: format!("Replacement {index}"),
+            });
+        }
+        save(&paths, &config).unwrap();
+
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let stop = stop.clone();
+            let file = paths.config_file.clone();
+            std::thread::spawn(move || {
+                let mut reads = 0usize;
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    read_file_config(&file).expect("every read parses");
+                    reads += 1;
+                }
+                reads
+            })
+        };
+        for round in 0..150 {
+            config.mcp.allow_start = round % 2 == 0;
+            save(&paths, &config).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(reader.join().unwrap() > 0);
+        let leftovers = fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(leftovers, 1, "only config.json remains (no temp files)");
     }
 
     fn restore_env(name: &str, previous: Option<std::ffi::OsString>) {

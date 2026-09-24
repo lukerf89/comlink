@@ -91,6 +91,91 @@ comlink modes apply --mode terminal --text "cargo test --all new line git status
 comlink modes apply --mode outlook --text "thanks new paragraph I can review today"
 ```
 
+## Agent Integration: `comlink mcp` (Phase 10b)
+
+`comlink mcp` is a local stdio [MCP](https://modelcontextprotocol.io) server.
+The MCP client (Claude Code, Claude Desktop) starts it as a subprocess and
+talks JSON-RPC over its stdin/stdout. It opens no network socket, and there is
+no remote or HTTP transport. Sessions live in the same meeting store as the
+CLI, so a meeting started by an agent can be stopped with `comlink meet stop`
+and the reverse. A recording keeps going if the client or server restarts.
+
+Tools: `meeting_start`, `meeting_status`, `meeting_stop` (always detached:
+poll `meeting_status` until `stopped`), `meeting_get_transcript` and
+`meeting_list`. Resources: `comlink://meetings/{id}/transcript.md` and
+`comlink://meetings/{id}/transcript.json`. See `docs/output-contract.md` for
+the schemas and error codes.
+
+### 1. Install and allow start
+
+Install a stable binary (an MCP client should not point at a `target/` dir
+that `cargo clean` removes), then opt in to agent-started recordings:
+
+```bash
+cargo install --path .
+comlink config set mcp.allow_start true   # default false: meeting_start is refused
+comlink doctor                            # shows mcp-server (binary path) and mcp-allow-start
+```
+
+`COMLINK_MCP_ALLOW_START=true|false` overrides the config file for one
+process; `config set` warns when the variable is set and disagrees. Status,
+stop, list and transcript reads work regardless of `mcp.allow_start`.
+
+MCP clients do not inherit your shell profile. Persist the model with
+`comlink models select base --path /path/to/ggml-base.en.bin`, and pass tool
+paths that are not on the default `PATH` (Homebrew's `/opt/homebrew/bin` often
+is not) as environment variables in the registration below.
+
+### 2. Register with Claude Code
+
+```bash
+claude mcp add comlink \
+  -e COMLINK_FFMPEG=/opt/homebrew/bin/ffmpeg \
+  -e COMLINK_WHISPER_CPP=/opt/homebrew/bin/whisper-cli \
+  -- "$(command -v comlink)" mcp
+claude mcp list
+```
+
+### 3. Register with Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json`, then
+restart Claude Desktop:
+
+```json
+{
+  "mcpServers": {
+    "comlink": {
+      "command": "/Users/you/.cargo/bin/comlink",
+      "args": ["mcp"],
+      "env": {
+        "COMLINK_FFMPEG": "/opt/homebrew/bin/ffmpeg",
+        "COMLINK_WHISPER_CPP": "/opt/homebrew/bin/whisper-cli"
+      }
+    }
+  }
+}
+```
+
+### Microphone permission (TCC)
+
+macOS grants microphone access to the app that launches `comlink mcp`, not to
+`comlink` itself: your terminal app for Claude Code, and Claude.app for Claude
+Desktop. The first recording may trigger the permission prompt for that app;
+grant it in System Settings, Privacy & Security, Microphone. Without it,
+recordings are near-silent and the agent sees a `near-silent` warning in
+`meeting_status` and `meeting_get_transcript`. Check the input from the same
+app with `comlink doctor --probe-mic`.
+
+### Privacy
+
+- `meeting_get_transcript` and the transcript resources send transcript text
+  to the calling model. Do not register the server with a client you would
+  not show your meetings to.
+- The server logs nothing and never writes transcript text to stderr; stdout
+  carries only JSON-RPC frames.
+- `comlink privacy audit` reports the MCP transport (`stdio`), that there is
+  no network listener, and the current `allow_start` value.
+
 ## Deferred From Phase 6
 
 Global hotkey, active paste, and app-specific automation remain deferred. Phase 6

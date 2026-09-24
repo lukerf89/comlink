@@ -2,6 +2,7 @@ use std::{
     env,
     fs::File,
     io::{self, ErrorKind, Read, Write},
+    os::unix::process::CommandExt,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::mpsc,
@@ -501,6 +502,10 @@ pub fn start_segmented_capture(
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::from(stderr))
+        // Own process group: a meeting recorder outlives the process that
+        // started it (`meet start`, or a `comlink mcp` server an MCP client
+        // may restart), so a signal to the starter's group must not stop it.
+        .process_group(0)
         .spawn()
         .map_err(|error| ComlinkError::AudioCaptureFailed(error.to_string()))?;
 
@@ -519,10 +524,19 @@ pub fn start_segmented_capture(
     }
 
     let pid = child.id();
-    Ok(SegmentedCapture {
-        pid,
-        identity: SegmentedCaptureIdentity::new(pid, &output_pattern),
-    })
+    // Read the identity before the reaper can collect the child, so the pid
+    // cannot have been reused yet.
+    let identity = SegmentedCaptureIdentity::new(pid, &output_pattern);
+    // Reap the recorder when it exits so a long-lived caller (the MCP server)
+    // never accumulates zombie recorders. The thread only waits: stopping is
+    // still done by signal through the recorded identity, and if this process
+    // exits first the recorder is reparented and keeps running.
+    let _ = thread::Builder::new()
+        .name("comlink-recorder-reaper".to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        });
+    Ok(SegmentedCapture { pid, identity })
 }
 
 pub fn chunk_output_pattern(chunks_dir: &Path) -> PathBuf {

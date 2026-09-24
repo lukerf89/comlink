@@ -1,0 +1,22 @@
+{
+  "audio_level": null,
+  "chunk_count": 2,
+  "elapsed_ms": 650,
+  "error": null,
+  "finalize_log": null,
+  "finalizer": null,
+  "recorders": [
+    {
+      "alive": true,
+      "device": ":0",
+      "pid": 80443,
+      "source_label": "user_mic"
+    }
+  ],
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "s1790233071990312000-80424-0",
+  "stale": false,
+  "stale_reason": null,
+  "status": "recording",
+  "warnings": []
+}

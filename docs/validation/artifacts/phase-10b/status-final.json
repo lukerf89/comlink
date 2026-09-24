@@ -1,0 +1,22 @@
+{
+  "audio_level": null,
+  "chunk_count": 0,
+  "elapsed_ms": 1353,
+  "error": null,
+  "finalize_log": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/finalize.log",
+  "finalizer": null,
+  "recorders": [
+    {
+      "alive": false,
+      "device": ":0",
+      "pid": 80443,
+      "source_label": "user_mic"
+    }
+  ],
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "s1790233071990312000-80424-0",
+  "stale": false,
+  "stale_reason": null,
+  "status": "stopped",
+  "warnings": []
+}

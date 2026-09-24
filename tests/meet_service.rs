@@ -1035,21 +1035,7 @@ fn process_launcher_reaps_the_finalizer_so_no_zombie_remains() {
 
     // The child has exited. Unreaped it would stay in state `Z` for as long
     // as this (long-lived) process runs; reaped it disappears from `ps`.
-    loop {
-        let output = Command::new("ps")
-            .args(["-o", "stat=", "-p", &pid.to_string()])
-            .output()
-            .unwrap();
-        let state = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if state.is_empty() {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "finalizer pid {pid} was not reaped; ps state {state:?}"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    common::assert_reaped(pid, Duration::from_secs(20));
 }
 
 // ---------------------------------------------------------------------------
@@ -1568,4 +1554,367 @@ fn finalize_repairs_a_preliminary_stopped_snapshot_left_by_a_failed_final_save()
     assert_eq!(repaired.stopped_at_ms, final_session.stopped_at_ms);
     assert_eq!(repaired.chunks_processed, Some(2));
     assert_eq!(harness.whisper_invocations(), 2, "no ASR for a repair");
+}
+
+// ---------------------------------------------------------------------------
+// LF-162: the MCP server is a long-lived tokio parent
+// ---------------------------------------------------------------------------
+
+fn mock_finalizer(harness: &ServiceHarness) -> (PathBuf, PathBuf) {
+    let marker = harness.root.join("finalizer-args");
+    let mock = harness.root.join("mock-comlink");
+    common::write_executable(
+        &mock,
+        &format!(
+            "#!/bin/sh\nprintf '%s ' \"$@\" > \"{}.tmp\"\nmv \"{}.tmp\" \"{}\"\n",
+            marker.display(),
+            marker.display(),
+            marker.display()
+        ),
+    );
+    (mock, marker)
+}
+
+fn current_thread_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn process_launcher_reaps_the_finalizer_when_launched_from_tokio_spawn_blocking() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let session = constructed_session(&harness.store(), "reap-tokio");
+    let (mock, marker) = mock_finalizer(&harness);
+
+    // Exactly how `comlink mcp` launches it: from a blocking-pool thread of a
+    // current-thread runtime, which then returns to the runtime.
+    let runtime = current_thread_runtime();
+    let pid = runtime.block_on(async move {
+        tokio::task::spawn_blocking(move || {
+            let launcher = meet_service::ProcessFinalizeLauncher::with_executable(&mock);
+            meet_service::FinalizeLauncher::launch(&launcher, &session)
+                .expect("launch finalizer")
+                .pid
+        })
+        .await
+        .unwrap()
+    });
+    assert_ne!(pid, std::process::id());
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while !marker.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "mock finalizer never ran"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        fs::read_to_string(&marker).unwrap().trim(),
+        "meet finalize reap-tokio --format json"
+    );
+    // The runtime (and its blocking thread) is still alive, like a server.
+    common::assert_reaped(pid, Duration::from_secs(20));
+    drop(runtime);
+}
+
+fn process_group(pid: u32) -> String {
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+#[test]
+fn recorders_started_from_a_long_lived_tokio_parent_are_detached_and_reaped() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = Arc::new(harness.ctx(Arc::new(NoopLauncher)));
+    let runtime = current_thread_runtime();
+
+    let started = {
+        let ctx = ctx.clone();
+        let harness_start = move || {
+            meet_service::start(
+                &ctx,
+                meet_service::StartRequest {
+                    mode: "raw".to_string(),
+                    device: ":0".to_string(),
+                    source: meet::MeetSourceMode::MicOnly,
+                    system_device: None,
+                    chunk_seconds: 30,
+                    no_llm: true,
+                },
+            )
+            .unwrap()
+        };
+        runtime.block_on(async move { tokio::task::spawn_blocking(harness_start).await.unwrap() })
+    };
+    common::wait_for_chunks(Path::new(&started.chunks_dir), 2);
+    let recorder = started.recorder_pid;
+
+    // Own process group, so a client killing the server's group (or the
+    // server exiting) does not stop the recording.
+    assert_eq!(process_group(recorder), recorder.to_string());
+    assert_ne!(process_group(recorder), process_group(std::process::id()));
+
+    let stop_ctx = ctx.clone();
+    runtime.block_on(async move {
+        tokio::task::spawn_blocking(move || {
+            meet_service::stop_detached(&stop_ctx, None, STOP_WAIT).unwrap()
+        })
+        .await
+        .unwrap()
+    });
+    // Stopped by signal; without a reaper it would stay a zombie of this
+    // (still running) parent.
+    common::assert_reaped(recorder, Duration::from_secs(20));
+    drop(runtime);
+}
+
+// ---------------------------------------------------------------------------
+// LF-162: prepare_start
+// ---------------------------------------------------------------------------
+
+fn start_options(mode: &str, source: &str) -> meet_service::StartOptions {
+    meet_service::StartOptions {
+        mode: mode.to_string(),
+        source: source.to_string(),
+        device: Some(":0".to_string()),
+        system_device: None,
+        chunk_seconds: 30,
+        no_llm: true,
+    }
+}
+
+#[test]
+fn prepare_start_validates_mode_then_model_then_source_in_cli_order() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    // Mode is checked before the (missing) model.
+    let error =
+        meet_service::prepare_start(&harness.resolved, None, start_options("nope", "bogus"))
+            .unwrap_err();
+    assert!(matches!(error, ComlinkError::ModeNotFound(ref mode) if mode == "nope"));
+    // No model configured and no injected runtime.
+    let error = meet_service::prepare_start(&harness.resolved, None, start_options("raw", "bogus"))
+        .unwrap_err();
+    assert!(matches!(error, ComlinkError::ModelMissing), "{error}");
+    // Source is checked last.
+    let error = meet_service::prepare_start(
+        &harness.resolved,
+        Some(harness.runtime.clone()),
+        start_options("raw", "bogus"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::InvalidConfigValue { name, ref value } if name == "meet start --source" && value == "bogus"),
+        "{error}"
+    );
+    assert!(harness.store().list_sessions().unwrap().0.is_empty());
+}
+
+#[test]
+fn prepare_start_resolves_the_runtime_once_into_the_start_context() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let prepared = meet_service::prepare_start(
+        &harness.resolved,
+        Some(harness.runtime.clone()),
+        start_options("raw", "mic-plus-system"),
+    )
+    .unwrap();
+    assert_eq!(prepared.request.device, ":0");
+    assert_eq!(prepared.request.source, meet::MeetSourceMode::MicPlusSystem);
+    assert_eq!(prepared.request.mode, "raw");
+    assert_eq!(prepared.device_note, None, "an explicit device has no note");
+    let runtime = prepared.runtime.clone();
+
+    let (ctx, request, note) = prepared.into_context(harness.resolved.clone());
+    let ctx_runtime = ctx.runtime.expect("start reuses the resolved runtime");
+    assert_eq!(ctx_runtime.ffmpeg, runtime.ffmpeg);
+    assert_eq!(ctx_runtime.whisper_cpp, runtime.whisper_cpp);
+    assert_eq!(ctx_runtime.whisper_model, runtime.whisper_model);
+    assert_eq!(request.source, meet::MeetSourceMode::MicPlusSystem);
+    assert!(note.is_none());
+}
+
+#[test]
+fn device_note_display_matches_the_historical_meet_start_stderr_line() {
+    let named = meet_service::DeviceNote {
+        name: Some("MacBook Pro Microphone".to_string()),
+        avfoundation_input: ":1".to_string(),
+    };
+    assert_eq!(
+        named.to_string(),
+        "Using system default input device: MacBook Pro Microphone (:1)"
+    );
+    let unnamed = meet_service::DeviceNote {
+        name: None,
+        avfoundation_input: ":0".to_string(),
+    };
+    assert_eq!(unnamed.to_string(), "Using system default input device :0");
+}
+
+// ---------------------------------------------------------------------------
+// LF-162: transcript
+// ---------------------------------------------------------------------------
+
+fn stopped_meeting(harness: &ServiceHarness) -> String {
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let started = harness.start(&ctx, 2);
+    meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+    started.session_id
+}
+
+fn failed_meeting(harness: &ServiceHarness) -> String {
+    let ctx = harness.ctx(Arc::new(FailingLauncher));
+    let started = harness.start(&ctx, 2);
+    meet_service::stop_detached(&ctx, None, STOP_WAIT).unwrap_err();
+    started.session_id
+}
+
+fn md() -> meet::MeetingExportKind {
+    meet::MeetingExportKind::Markdown
+}
+
+#[test]
+fn transcript_reads_the_stopped_session_while_another_records() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let stopped = stopped_meeting(&harness);
+    let recording = harness.start(&ctx, 2).session_id;
+
+    let transcript = meet_service::transcript(&ctx, None, md()).unwrap();
+    assert_eq!(transcript.session_id, stopped);
+    assert_eq!(transcript.status, "stopped");
+    assert_eq!(transcript.format, "md");
+    assert_eq!(transcript.schema_version, "comlink.meeting.v1");
+    assert!(transcript.transcript_retained);
+    // Same selection as `meet export`.
+    assert_eq!(
+        transcript.content.as_str().unwrap(),
+        meet_service::export(&ctx, None, md()).unwrap()
+    );
+    // The recording itself has no transcript yet.
+    let error = meet_service::transcript(&ctx, Some(recording.clone()), md()).unwrap_err();
+    assert!(matches!(error, ComlinkError::MeetingNotStopped(ref id) if *id == recording));
+    meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+}
+
+#[test]
+fn transcript_never_falls_back_past_a_newer_transcribing_or_failed_session() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let stopped = stopped_meeting(&harness);
+    let transcribing = harness.transcribing_session();
+
+    let error = meet_service::transcript(&ctx, None, md()).unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingStillTranscribing(ref id) if *id == transcribing),
+        "{error}"
+    );
+    let error = meet_service::transcript(&ctx, Some(transcribing.clone()), md()).unwrap_err();
+    assert!(matches!(error, ComlinkError::MeetingStillTranscribing(_)));
+    // The older meeting is still readable by id.
+    assert_eq!(
+        meet_service::transcript(&ctx, Some(stopped.clone()), md())
+            .unwrap()
+            .session_id,
+        stopped
+    );
+
+    // Finish it, then a newer failed session blocks the implicit read with
+    // its error text and the retry command.
+    meet_service::finalize(&ctx, &transcribing, STOP_WAIT).unwrap();
+    let failed = failed_meeting(&harness);
+    for id in [None, Some(failed.clone())] {
+        let error = meet_service::transcript(&ctx, id, md()).unwrap_err();
+        match &error {
+            ComlinkError::MeetingFinalizeFailedDetail { id, error: detail } => {
+                assert_eq!(id, &failed);
+                assert!(detail.contains("mock spawn failure"), "{detail}");
+            }
+            other => panic!("expected the detailed finalize failure, got {other:?}"),
+        }
+        assert!(error
+            .to_string()
+            .contains(&format!("comlink meet finalize {failed}")));
+        assert_eq!(error.error_code(), "meeting_finalize_failed");
+    }
+    // `meet export` keeps its historical (terse) error.
+    let error = meet_service::export(&ctx, None, md()).unwrap_err();
+    assert!(matches!(error, ComlinkError::MeetingFinalizeFailed(ref id) if *id == failed));
+}
+
+#[test]
+fn transcript_errors_for_none_unknown_and_missing_or_invalid_json_export() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let error = meet_service::transcript(&ctx, None, md()).unwrap_err();
+    assert!(matches!(error, ComlinkError::MeetingNoActiveSession));
+    let error =
+        meet_service::transcript(&ctx, Some("no-such-meeting".to_string()), md()).unwrap_err();
+    assert!(matches!(error, ComlinkError::MeetingSessionNotFound(_)));
+
+    let id = stopped_meeting(&harness);
+    let session = harness.store().read_session(&id).unwrap();
+    let original = fs::read(&session.json_export_path).unwrap();
+    // Markdown still needs a valid JSON export for its metadata.
+    fs::write(&session.json_export_path, b"{ not json").unwrap();
+    let error = meet_service::transcript(&ctx, Some(id.clone()), md()).unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingExportUnavailable(_)),
+        "{error}"
+    );
+    fs::remove_file(&session.json_export_path).unwrap();
+    let error = meet_service::transcript(&ctx, Some(id.clone()), md()).unwrap_err();
+    assert!(
+        matches!(error, ComlinkError::MeetingExportUnavailable(_)),
+        "{error}"
+    );
+
+    fs::write(&session.json_export_path, original).unwrap();
+    let transcript =
+        meet_service::transcript(&ctx, Some(id.clone()), meet::MeetingExportKind::Json).unwrap();
+    assert_eq!(transcript.format, "json");
+    assert!(transcript.content.is_object());
+    assert_eq!(transcript.content["schema_version"], "comlink.meeting.v1");
+    assert_eq!(transcript.content["session"]["session_id"], id.as_str());
+    // Serialized, the content is a nested object, not a JSON string.
+    let serialized = serde_json::to_value(&transcript).unwrap();
+    assert!(serialized["content"].is_object());
+}
+
+#[test]
+fn transcript_with_retention_off_is_not_an_error() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let mut ctx = harness.ctx(Arc::new(NoopLauncher));
+    ctx.resolved.config.retention.transcripts = false;
+    let started = harness.start(&ctx, 2);
+    meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+
+    let transcript = meet_service::transcript(&ctx, None, meet::MeetingExportKind::Json).unwrap();
+    assert_eq!(transcript.session_id, started.session_id);
+    assert!(!transcript.transcript_retained);
+    assert!(transcript.content["final_text"].is_null());
+}
+
+#[test]
+fn mcp_privacy_reports_stdio_no_listener_and_allow_start() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let privacy = meet_service::mcp_privacy(&harness.resolved);
+    assert_eq!(privacy.transport, "stdio");
+    assert!(!privacy.network_listener);
+    assert!(!privacy.allow_start);
+    assert!(privacy.transcripts_sent_to_calling_model);
+    assert!(privacy
+        .note
+        .contains("comlink config set mcp.allow_start true"));
+
+    let mut resolved = harness.resolved.clone();
+    resolved.config.mcp.allow_start = true;
+    let privacy = meet_service::mcp_privacy(&resolved);
+    assert!(privacy.allow_start);
+    assert!(privacy.note.contains("mcp.allow_start=true"));
 }

@@ -197,6 +197,168 @@ The codes in the table below are unchanged. The meeting-specific cases are:
 - A detached finalizer that cannot be launched exits `1`, and the session is marked `failed`.
 - `meet finalize` exits with the underlying error's code, so a whisper.cpp failure exits `3`.
 
+## MCP Server (`comlink mcp`, Phase 10b)
+
+`comlink mcp` serves the Model Context Protocol over stdio. The client
+launches it as a subprocess. stdout carries only JSON-RPC 2.0 frames and
+stderr stays empty; a fatal startup or transport failure prints one `error:`
+line to stderr and exits `1`. It opens no network listener, keeps no state
+of its own (everything is in the meeting store the CLI uses), and reloads the
+config file on every call.
+
+**Tool results that contain transcripts are sent to the calling model.** This
+covers `meeting_get_transcript` and both transcript resources. `meeting_status`
+and `meeting_list` carry no transcript text.
+
+### Protocol versions
+
+The server accepts `2025-03-26`, `2025-06-18` and `2025-11-25` (rmcp 3.4.1).
+A client that asks for a supported version gets it back. Any other version
+(older, newer or unknown) gets `2025-11-25`, and the client decides whether to
+continue.
+
+### Tools
+
+Every tool returns `structuredContent` (the JSON below) plus text content: one
+or more human-readable lines, then the same JSON pretty-printed. For
+`meeting_get_transcript` with `format: "md"`, the last text block is the
+Markdown itself. There is no `outputSchema`.
+
+| Tool | Input | `structuredContent` on success |
+| --- | --- | --- |
+| `meeting_start` | `source` (`mic-only` \| `system-only` \| `mic-plus-system`, required), `mode` (required), `device?`, `system_device?`, `no_llm?` | the `meet start --format json` object (`comlink.meeting.v1`). The first text block is the consent reminder, which the agent should pass on; when the system default input was used, the next block names it. |
+| `meeting_status` | `id?` | the `meet status --format json` object, all fields included: `stale`, `stale_reason`, `error`, `finalize_log`, `warnings`, `audio_level`, `recorders`, `finalizer`. Each warning is also a `warning: ...` text line. |
+| `meeting_stop` | `id?` | the `meet stop --detach --format json` object (`status: "transcribing"`). The tool always takes the detached path: poll `meeting_status` with the id until `stopped` (or `failed`). |
+| `meeting_get_transcript` | `id?`, `format` (`md` \| `json`, required) | `TranscriptResult` (below) |
+| `meeting_list` | none | `{sessions: [{session_id, status, started_at_ms, stopped_at_ms, duration_ms, segment_count, source_mode}], skipped: [{dir, reason}]}`, newest first |
+
+`meeting_start` uses the default 300-second chunks and the same validation
+order as `meet start`: mode, model, dependencies, device, then source.
+
+`TranscriptResult`:
+
+```json
+{
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "...",
+  "status": "stopped",
+  "format": "md",
+  "content": "# Meeting ...",
+  "transcript_retained": true,
+  "warnings": ["..."],
+  "audio_level": {"mean_dbfs": -30.1, "peak_dbfs": -12.0, "near_silent": false}
+}
+```
+
+- For `format: "json"`, `content` is the JSON export as an object (the same
+  document as `meet export --format json`), not a string.
+- `warnings` and `audio_level` always come from the validated JSON export,
+  even for `md`. So a session whose JSON export is missing or invalid returns
+  `meeting_export_unavailable`, even if the Markdown file exists.
+- `transcript_retained` is the session's `retention.transcripts`. When it is
+  `false` the call still succeeds. The export's transcript fields are `null`
+  by design and a text note says so.
+- Session selection with no `id` is the same as `meet export`. The newest
+  stopped meeting is used, unless a newer meeting is still `transcribing`
+  (`meeting_still_transcribing`) or `failed` (`meeting_finalize_failed`). An
+  active recording does not block reading an older stopped meeting.
+
+### Tool annotations
+
+`openWorldHint` is `false` on every tool: nothing leaves the machine except
+the result itself.
+
+| Tool | `readOnlyHint` | `destructiveHint` | `idempotentHint` | Why |
+| --- | --- | --- | --- | --- |
+| `meeting_start` | false | false | false | Turns on the microphone; a second call returns `meeting_already_active`. Clients should ask before calling it. |
+| `meeting_stop` | false | true | false | Stops the recorders for good, and the detached finalize deletes the audio chunks when `retention.audio` is off. |
+| `meeting_status` | true | false | true | Reads the store and process table only. |
+| `meeting_get_transcript` | true | false | true | Reads exports only. |
+| `meeting_list` | true | false | true | Reads the store only. |
+
+### Tool errors
+
+A service error never becomes a JSON-RPC error. It is a normal result with
+`isError: true`, `structuredContent: {"error_code": "...", "message": "..."}`,
+and one text block `error (<error_code>): <message>`. `message` is the
+same text the CLI prints after `error: `. Arguments that do not match the
+input schema (for example an unknown `source`) are rejected by the SDK before
+any service call, as `isError: true` with a text block starting
+`failed to deserialize parameters` and no `structuredContent`.
+
+`error_code` is stable. It is `ComlinkError::error_code()`, an exhaustive
+match, so a new error cannot ship without a code. Codes an agent will see:
+
+| `error_code` | When |
+| --- | --- |
+| `mcp_start_disabled` | `meeting_start` while `mcp.allow_start` is false; the message names `comlink config set mcp.allow_start true` |
+| `meeting_already_active` | `meeting_start` while a meeting is recording |
+| `meeting_no_active_session` | `meeting_stop` with no id and nothing recording; `meeting_get_transcript` with no meetings |
+| `meeting_session_not_found` | unknown `id`, or an id that is not a plain session name (`/`, `..`, empty) |
+| `meeting_not_recording` | `meeting_stop` on a session that is not recording |
+| `meeting_not_stopped` | `meeting_get_transcript` on a session that is still recording |
+| `meeting_still_transcribing` | `meeting_get_transcript` while finalize runs |
+| `meeting_finalize_failed` | `meeting_get_transcript` on a `failed` session; the message includes the recorded error and `comlink meet finalize <id>` |
+| `meeting_export_unavailable` | the session is stopped but its JSON export is missing or invalid |
+| `meeting_session_unreadable` | a `session.json` exists but cannot be parsed |
+| `meeting_lifecycle_busy` | another comlink process holds the session lock |
+| `meeting_finalize_launch_failed` | the detached finalizer could not be started (the session is `failed`) |
+| `mode_not_found`, `model_missing`, `model_path_missing`, `dependency_missing`, `dependency_path_missing`, `dependency_not_executable`, `audio_capture_failed`, `invalid_config_value` | `meeting_start` setup failures, same as `meet start` |
+| `internal_panic` | the service call panicked; the server keeps running |
+
+Other codes (`io`, `json`, `storage`, `config_parse`, `whisper_failed`,
+`meeting_chunk_cleanup_failed`, `meeting_export_invalid`, ...) follow the same
+snake_case naming as the `ComlinkError` variant.
+
+### Resources
+
+| URI template | `mimeType` | Content |
+| --- | --- | --- |
+| `comlink://meetings/{id}/transcript.md` | `text/markdown` | the Markdown export |
+| `comlink://meetings/{id}/transcript.json` | `application/json` | the JSON export (pretty-printed) |
+
+`resources/list` lists both URIs for every `stopped` session.
+`resources/templates/list` returns exactly these two templates. `{id}` is one
+percent-decoded path segment made of `[A-Za-z0-9._-]` with no `..`. Resource
+reads cannot carry `isError`, so failures are JSON-RPC errors with
+`data: {"error_code", "message"}`:
+
+| Failure | JSON-RPC `code` | `data.error_code` |
+| --- | --- | --- |
+| URI does not match a template (wrong scheme or host, unsupported suffix, extra segments, bad id or encoding) | `-32602` (invalid params) | `invalid_resource_uri` |
+| Unknown session | `-32002` (resource not found) | `meeting_session_not_found` |
+| Session not readable yet: recording, transcribing, failed, or export missing | `-32600` (invalid request) | `meeting_not_stopped`, `meeting_still_transcribing`, `meeting_finalize_failed`, `meeting_export_unavailable` |
+| Anything else | `-32603` (internal error) | the error's code |
+
+### `config set` and `privacy audit`
+
+`comlink config set mcp.allow_start true|false` is the only settable key
+(`unknown_config_key` and exit `1` otherwise). It rewrites the config file
+atomically and changes nothing else. Environment values are never persisted.
+It prints `set mcp.allow_start=<bool> in <path>` on stdout. If
+`COMLINK_MCP_ALLOW_START` is set and disagrees, it adds a stderr note that
+the variable takes precedence. `config show` prints
+`mcp: allow_start=<bool>`.
+
+`privacy audit --format json` adds an `mcp` object next to `meeting_audio`
+(additive):
+
+```json
+"mcp": {
+  "transport": "stdio",
+  "network_listener": false,
+  "allow_start": false,
+  "transcripts_sent_to_calling_model": true,
+  "note": "..."
+}
+```
+
+`--format text` adds one line:
+`mcp: transport=stdio network_listener=false allow_start=<bool> transcripts_sent_to_calling_model=true`.
+`doctor` adds two checks, `mcp-server` (the binary path and a
+`claude mcp add` hint) and `mcp-allow-start`. Both are `required: false` with
+status `ok` or `info`, so they never fail doctor.
+
 ## Agent Examples
 
 Parse a saved JSON transcript:

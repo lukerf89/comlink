@@ -1,0 +1,13 @@
+{
+  "content": [
+    {
+      "type": "text",
+      "text": "error (mcp_start_disabled): meeting_start is disabled for MCP clients (mcp.allow_start=false); enable it with `comlink config set mcp.allow_start true`"
+    }
+  ],
+  "structuredContent": {
+    "error_code": "mcp_start_disabled",
+    "message": "meeting_start is disabled for MCP clients (mcp.allow_start=false); enable it with `comlink config set mcp.allow_start true`"
+  },
+  "isError": true
+}

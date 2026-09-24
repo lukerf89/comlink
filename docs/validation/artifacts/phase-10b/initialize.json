@@ -1,0 +1,16 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": "2025-06-18",
+    "capabilities": {
+      "resources": {},
+      "tools": {}
+    },
+    "serverInfo": {
+      "name": "comlink",
+      "version": "0.1.0"
+    },
+    "instructions": "Comlink records and transcribes meetings locally on this Mac. Before meeting_start, confirm everyone present knows the meeting is being recorded and transcribed, and relay the consent reminder in the result. meeting_start is refused until the user runs `comlink config set mcp.allow_start true`. meeting_stop returns `transcribing` immediately: poll meeting_status until it reports `stopped`, then call meeting_get_transcript. Surface any `warnings` (for example near-silent capture, which usually means the microphone permission or input device is wrong) to the user. Transcript text returned by this server is sent to you, the calling model."
+  }
+}
