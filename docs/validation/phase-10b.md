@@ -187,18 +187,32 @@ with two new mediums, both fixed in a further commit:
   group id never matches). Status, reclaim and stop use that check; stop
   signals the group and waits until it is empty.
 
-A second, short confirming Codex re-review then covered that commit (see the
-PR body for its result).
+Further scoped confirming Codex passes, one per fix commit:
+- Pass 2 (214 s): TOCTOU fixed. The capture fix was partial: `pgrep -g`
+  without a pattern fails on Linux procps. Codex also flagged that a
+  leaderless stop could signal a reused group id, and that substring
+  matching could accept an unrelated command. Fix: one portable
+  `ps -A -o pid=,pgid=,stat=,lstart=,command=` listing, a whole-argument
+  match on the chunk pattern, and a group signal only while the verified
+  leader is alive (otherwise verified pids only).
+- Pass 3: fixed. It found that the change let a stop return while a
+  non-capture descendant that ignored SIGINT survived. Fix: while the leader
+  is verified, each stop round tracks every group member by pid and start
+  time, escalates them individually after the leader exits, and waits for
+  all of them. The plain `sleep` descendant test is restored.
+- Pass 4 (83 s): **approve**. Fixed, and Codex agrees the remaining
+  check-then-signal window is an inherent limitation (see Known Gaps).
 
 Every fix has a regression test that fails with the fix reverted (checked
 by reverting each fix locally): the concurrent-start test failed 3/3 without
 the lock; the config race test reported "a stale snapshot re-enabled start";
-the group test left the descendant in state `S`; the leader-exit test
+the group test left the descendant in state `S` (against both the original
+code and the pattern-only intermediate fix); the leader-exit test
 reported the session stale; the in-directory symlink test read
 `segments.jsonl` as the transcript.
 
 Gate after the round: `cargo fmt --check`, `cargo clippy --all-targets -- -D
-warnings`, `cargo test --all` three times (0 failures; see the PR body for the final counts),
+warnings`, `cargo test --all` three times (253 passed, 0 failed each run),
 `cargo run -- doctor` (exit 0), `cargo run -- privacy audit --format json`,
 `scripts/e2e/phase-10b-mcp.sh` and `scripts/e2e/phase-10a-meet-service.sh`
 all passed.
@@ -215,6 +229,8 @@ all passed.
 - Protocol `2024-11-05` is not accepted (older MCP Inspector / Desktop builds are offered `2025-11-25`).
 - With no sessions at all, `meeting_get_transcript` returns `meeting_no_active_session` ("no active meeting session"), which is worded for recording.
 - `meet export` (CLI) keeps trusting the export paths in `session.json`; only the MCP transcript reads are confined to the session directory.
+- Recorder stop verifies the recorder's leader and then signals its process group as two separate steps. If the leader exits and its group id is reused in between, the wrong group could be signalled. This check-then-signal window is inherent to pid/pgid signalling without a pidfd-like handle on macOS, and the pre-existing leader-pid kill has the same window (Codex agreed it is not a merge blocker).
+- Capture liveness and stop rely on `ps` output (`LC_ALL=C`, `lstart` = 5 words). They are tested on macOS; Linux procps prints the same columns, but only the unit parser is exercised there.
 - Concurrent `meeting_start` is tested at the service level (the MCP handlers call the same `start`), not with two in-flight MCP requests.
 - `resources/read` on a still-recording session (`-32600`) has no dedicated test.
 

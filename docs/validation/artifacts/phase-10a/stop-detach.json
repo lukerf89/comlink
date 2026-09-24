@@ -1,17 +1,17 @@
 {
   "schema_version": "comlink.meeting.v1",
-  "session_id": "s1790235818929816000-55488-0",
+  "session_id": "s1790236120129587000-87622-0",
   "status": "transcribing",
-  "elapsed_ms": 524,
+  "elapsed_ms": 551,
   "preliminary_duration_ms": 60000,
   "chunk_count": 2,
-  "finalizer_pid": 55646,
+  "finalizer_pid": 87663,
   "artifacts": {
-    "session_dir": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0",
-    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/segments.jsonl",
-    "json_export": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/transcript.json",
-    "markdown_export": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/transcript.md",
+    "session_dir": "<tmp>/comlink-data/meetings/s1790236120129587000-87622-0",
+    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790236120129587000-87622-0/segments.jsonl",
+    "json_export": "<tmp>/comlink-data/meetings/s1790236120129587000-87622-0/transcript.json",
+    "markdown_export": "<tmp>/comlink-data/meetings/s1790236120129587000-87622-0/transcript.md",
     "chunks_dir": null
   },
-  "finalize_log": "<tmp>/comlink-data/meetings/s1790235818929816000-55488-0/finalize.log"
+  "finalize_log": "<tmp>/comlink-data/meetings/s1790236120129587000-87622-0/finalize.log"
 }
