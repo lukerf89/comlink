@@ -1,0 +1,40 @@
+{
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "<SESSION>",
+  "status": "stopped",
+  "elapsed_ms": "<V>",
+  "duration_ms": 60000,
+  "chunks_processed": 2,
+  "segment_count": 2,
+  "source": {
+    "mode": "mic-only",
+    "streams": [
+      {
+        "label": "user_mic",
+        "device": ":0"
+      }
+    ]
+  },
+  "retention": {
+    "metadata": true,
+    "transcripts": true,
+    "audio": false
+  },
+  "segmenting": {
+    "strategy": "chunk-boundaries",
+    "vad_available": false,
+    "detail": "ASR did not expose VAD segment timing; Comlink used capture chunk boundaries"
+  },
+  "artifacts": {
+    "session_dir": "<ROOT>/data/meetings/<SESSION>",
+    "segments_jsonl": "<ROOT>/data/meetings/<SESSION>/segments.jsonl",
+    "json_export": "<ROOT>/data/meetings/<SESSION>/transcript.json",
+    "markdown_export": "<ROOT>/data/meetings/<SESSION>/transcript.md",
+    "chunks_dir": null
+  },
+  "warnings": [],
+  "inactivity_auto_stop": {
+    "enabled": false,
+    "reason": "not enabled in Phase 7; the current capture adapter has no reliable realtime silence signal"
+  }
+}

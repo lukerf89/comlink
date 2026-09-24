@@ -1,0 +1,22 @@
+{
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "s1790231185406637000-64769-0",
+  "status": "stopped",
+  "elapsed_ms": 1287,
+  "recorders": [
+    {
+      "source_label": "user_mic",
+      "device": ":0",
+      "pid": 64770,
+      "alive": false
+    }
+  ],
+  "finalizer": null,
+  "chunk_count": 0,
+  "audio_level": null,
+  "warnings": [],
+  "stale": false,
+  "stale_reason": null,
+  "error": null,
+  "finalize_log": "<tmp>/comlink-data/meetings/s1790231185406637000-64769-0/finalize.log"
+}

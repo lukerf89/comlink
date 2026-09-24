@@ -86,6 +86,38 @@ pub enum ComlinkError {
     #[error("meeting export is not available: {0}")]
     MeetingExportUnavailable(PathBuf),
 
+    #[error("meeting export at {path} is invalid ({reason}); fix or remove the invalid export at {path}, then rerun `comlink meet finalize {id}`")]
+    MeetingExportInvalid {
+        id: String,
+        path: PathBuf,
+        reason: String,
+    },
+
+    #[error("meeting session is not awaiting finalize (still recording): {0}")]
+    MeetingNotTranscribing(String),
+
+    #[error("meeting session is busy; another comlink process holds its lifecycle lock: {0}")]
+    MeetingLifecycleBusy(String),
+
+    #[error("meeting finalizer could not be launched: {0}")]
+    MeetingFinalizeLaunchFailed(String),
+
+    #[error("meeting session is still transcribing: {0}; run `comlink meet status {0}`")]
+    MeetingStillTranscribing(String),
+
+    #[error("meeting session finalize failed: {0}; run `comlink meet status {0}`, then `comlink meet finalize {0}` to retry")]
+    MeetingFinalizeFailed(String),
+
+    #[error("meeting audio chunk cleanup failed for {id} (retention.audio=false): {reason}; rerun `comlink meet finalize {id}`")]
+    MeetingChunkCleanupFailed { id: String, reason: String },
+
+    #[error("meeting session {id} is unreadable: {reason}; inspect or remove {path}")]
+    MeetingSessionUnreadable {
+        id: String,
+        path: PathBuf,
+        reason: String,
+    },
+
     #[error("{kind} not found: {name}")]
     NotFound { kind: &'static str, name: String },
 
@@ -154,6 +186,62 @@ mod tests {
         assert_eq!(
             ComlinkError::ClipboardFailed("pbcopy failed".to_string()).exit_code(),
             5
+        );
+    }
+
+    #[test]
+    fn meeting_lifecycle_errors_use_general_exit_code() {
+        assert_eq!(
+            ComlinkError::MeetingNotTranscribing("s1".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingLifecycleBusy("s1".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingFinalizeLaunchFailed("spawn failed".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingStillTranscribing("s1".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingFinalizeFailed("s1".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingChunkCleanupFailed {
+                id: "s1".to_string(),
+                reason: "denied".to_string(),
+            }
+            .exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingExportInvalid {
+                id: "s1".to_string(),
+                path: "s1/transcript.json".into(),
+                reason: "eof".to_string(),
+            }
+            .exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingSessionUnreadable {
+                id: "s1".to_string(),
+                path: "s1/session.json".into(),
+                reason: "eof".to_string(),
+            }
+            .exit_code(),
+            1
+        );
+        // Existing codes are unchanged, so a finalize that surfaces a whisper
+        // failure still exits 3.
+        assert_eq!(
+            ComlinkError::WhisperFailed("mock".to_string()).exit_code(),
+            3
         );
     }
 }

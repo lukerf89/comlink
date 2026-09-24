@@ -708,6 +708,14 @@ Phase completion artifact:
 
 - `docs/validation/phase-10.md`
 
+### Phase 10a: Meeting Service Core, `meet status`, and Detached Finalize
+
+First Phase 10 sub-mission (groundwork for a later MCP server; no MCP code). The meeting lifecycle moves into `src/meet_service.rs`, which returns typed results and never prints. It adds `comlink meet status [id]`, `comlink meet stop --detach`, and an internal, idempotent `comlink meet finalize <id>`. `comlink.meeting.v1` gains the additive status values `transcribing` and `failed`. Plain `meet stop` stays synchronous and its output is byte-identical.
+
+- Status: implemented; awaiting the manual pause gate.
+- Agent E2E: `scripts/e2e/phase-10a-meet-service.sh`.
+- Phase completion artifact: `docs/validation/phase-10a.md`.
+
 ## Phase Acceptance Summary
 
 | Phase | Manual test checkpoint | Must pass before next phase |
