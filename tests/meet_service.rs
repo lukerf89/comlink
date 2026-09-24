@@ -142,6 +142,32 @@ fn launch_failure_marks_session_failed_and_finalize_can_retry() {
     assert_eq!(report.status, "failed");
     assert!(!report.stale);
     assert!(report.error.is_some());
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("finalize failed")
+                && warning.contains("finalize.log")
+                && warning.contains(&format!("comlink meet finalize {}", started.session_id))),
+        "{:?}",
+        report.warnings
+    );
+
+    // A bare `meet status` surfaces the failed session instead of `none`.
+    let report = meet_service::status(&ctx, None).unwrap();
+    assert_eq!(
+        report.session_id.as_deref(),
+        Some(started.session_id.as_str())
+    );
+    assert_eq!(report.status, "failed");
+    assert!(!report.warnings.is_empty());
+
+    // A bare `meet export` refuses rather than exporting an older meeting.
+    let error = meet_service::export(&ctx, None, meet::MeetingExportKind::Markdown).unwrap_err();
+    assert!(
+        matches!(&error, ComlinkError::MeetingFinalizeFailed(id) if id == &started.session_id),
+        "{error}"
+    );
 
     let finalized =
         meet_service::finalize(&ctx, &started.session_id, Duration::from_secs(1)).unwrap();
@@ -149,6 +175,43 @@ fn launch_failure_marks_session_failed_and_finalize_can_retry() {
     let session = store.read_session(&started.session_id).unwrap();
     assert_eq!(session.status, MeetingStatus::Stopped);
     assert!(session.error.is_none());
+}
+
+#[test]
+fn bare_export_after_detached_stop_does_not_fall_back_to_older_meeting() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let store = harness.store();
+
+    // An earlier, fully stopped meeting.
+    let first = harness.start(&ctx, 2);
+    meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+    let mut earlier = store.read_session(&first.session_id).unwrap();
+    earlier.started_at_ms -= 60_000;
+    store.save_session(&earlier).unwrap();
+    assert!(
+        meet_service::export(&ctx, None, meet::MeetingExportKind::Markdown).is_ok(),
+        "the stopped meeting exports while it is the newest"
+    );
+
+    // A newer meeting stopped with --detach is still transcribing.
+    let second = harness.start(&ctx, 2);
+    let detached = meet_service::stop_detached(&ctx, None, STOP_WAIT).unwrap();
+    assert_eq!(detached.status, "transcribing");
+    let error = meet_service::export(&ctx, None, meet::MeetingExportKind::Markdown).unwrap_err();
+    assert!(
+        matches!(&error, ComlinkError::MeetingStillTranscribing(id) if id == &second.session_id),
+        "{error}"
+    );
+    assert_eq!(error.exit_code(), 1);
+    assert!(error
+        .to_string()
+        .contains(&format!("comlink meet status {}", second.session_id)));
+
+    // Once finalized, the bare export resolves to the newer meeting.
+    meet_service::finalize(&ctx, &second.session_id, Duration::from_secs(1)).unwrap();
+    let json = meet_service::export(&ctx, None, meet::MeetingExportKind::Json).unwrap();
+    assert!(json.contains(&second.session_id));
 }
 
 #[test]
@@ -438,13 +501,32 @@ fn status_resolves_active_then_newest_transcribing_then_none() {
     assert_eq!(report.status, "transcribing");
     assert!(report.stale, "no lock holder and no finalizer");
 
-    for mut session in [older, newer] {
+    for mut session in [older.clone(), newer.clone()] {
         session.status = MeetingStatus::Stopped;
         store.save_session(&session).unwrap();
     }
     let report = meet_service::status(&ctx, None).unwrap();
     assert_eq!(report.status, "none");
     assert!(report.session_id.is_none());
+
+    // A failed session newer than every stopped one is reported, not `none`.
+    let mut failed = newer.clone();
+    failed.status = MeetingStatus::Failed;
+    failed.error = Some("mock whisper failure".to_string());
+    store.save_session(&failed).unwrap();
+    let report = meet_service::status(&ctx, None).unwrap();
+    assert_eq!(report.session_id.as_deref(), Some("t-newer"));
+    assert_eq!(report.status, "failed");
+    assert!(report
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("finalize failed: mock whisper failure")));
+
+    // An older failed session behind a newer stopped one is not.
+    failed.started_at_ms = 50;
+    store.save_session(&failed).unwrap();
+    let report = meet_service::status(&ctx, None).unwrap();
+    assert_eq!(report.status, "none");
 
     let error = meet_service::status(&ctx, Some("missing".to_string())).unwrap_err();
     assert!(matches!(error, ComlinkError::MeetingSessionNotFound(_)));

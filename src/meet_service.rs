@@ -778,10 +778,24 @@ fn resolve_default_status_session(
             }
         }
     }
-    match store.latest_session_with_status(MeetingStatus::Transcribing)? {
-        Some(id) => Ok(Some(store.read_session(&id)?)),
-        None => Ok(None),
+    let (sessions, _) = store.list_sessions()?;
+    if let Some(session) = sessions
+        .iter()
+        .find(|session| session.status == MeetingStatus::Transcribing)
+    {
+        return Ok(Some(session.clone()));
     }
+    // A failed finalize must not read as "nothing happening": surface the
+    // newest `failed` session when it is newer than the newest stopped one.
+    Ok(sessions
+        .into_iter()
+        .find(|session| {
+            matches!(
+                session.status,
+                MeetingStatus::Stopped | MeetingStatus::Failed
+            )
+        })
+        .filter(|session| session.status == MeetingStatus::Failed))
 }
 
 fn session_status_report(
@@ -833,6 +847,9 @@ fn session_status_report(
     if let Some(reason) = &stale_reason {
         warnings.push(reason.clone());
     }
+    if session.status == MeetingStatus::Failed {
+        warnings.push(failed_session_warning(session));
+    }
 
     Ok(MeetStatusReport {
         schema_version: meet::MEETING_SCHEMA_VERSION,
@@ -848,6 +865,15 @@ fn session_status_report(
         stale_reason,
         error: session.error.clone(),
     })
+}
+
+fn failed_session_warning(session: &MeetingSessionState) -> String {
+    let id = &session.session_id;
+    format!(
+        "finalize failed: {}; see {}; rerun `comlink meet finalize {id}`",
+        session.error.as_deref().unwrap_or("unknown error"),
+        finalize_log_path(session).display()
+    )
 }
 
 /// A session is stale when it claims to be active but nothing is working on
@@ -945,7 +971,9 @@ fn chunk_audio_level(path: &Path) -> Option<meet::MeetingAudioLevel> {
 // export and list
 // ---------------------------------------------------------------------------
 
-/// Read a stopped session's export. With no id: the newest stopped session.
+/// Read a stopped session's export. With no id: the newest stopped session,
+/// unless a newer session is still transcribing or failed to finalize, which
+/// is an error rather than a silent fallback to an older meeting.
 pub fn export(
     ctx: &MeetContext,
     id: Option<String>,
@@ -955,6 +983,21 @@ pub fn export(
     let id = match id {
         Some(id) => id,
         None => {
+            let (sessions, _) = store.list_sessions()?;
+            let newest_finished = sessions
+                .into_iter()
+                .find(|session| session.status != MeetingStatus::Recording);
+            if let Some(session) = newest_finished {
+                match session.status {
+                    MeetingStatus::Transcribing => {
+                        return Err(ComlinkError::MeetingStillTranscribing(session.session_id))
+                    }
+                    MeetingStatus::Failed => {
+                        return Err(ComlinkError::MeetingFinalizeFailed(session.session_id))
+                    }
+                    _ => {}
+                }
+            }
             if let Some(id) = store.latest_stopped_session_id()? {
                 id
             } else if let Some(active_id) = store.active_session_id()? {

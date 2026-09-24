@@ -95,6 +95,12 @@ pub enum ComlinkError {
     #[error("meeting finalizer could not be launched: {0}")]
     MeetingFinalizeLaunchFailed(String),
 
+    #[error("meeting session is still transcribing: {0}; run `comlink meet status {0}`")]
+    MeetingStillTranscribing(String),
+
+    #[error("meeting session finalize failed: {0}; run `comlink meet status {0}`, then `comlink meet finalize {0}` to retry")]
+    MeetingFinalizeFailed(String),
+
     #[error("{kind} not found: {name}")]
     NotFound { kind: &'static str, name: String },
 
@@ -178,6 +184,14 @@ mod tests {
         );
         assert_eq!(
             ComlinkError::MeetingFinalizeLaunchFailed("spawn failed".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingStillTranscribing("s1".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingFinalizeFailed("s1".to_string()).exit_code(),
             1
         );
         // Existing codes are unchanged, so a finalize that surfaces a whisper

@@ -115,7 +115,7 @@ This finishes a `transcribing` or `failed` session and prints the same payload s
 
 ### `meet status [id]`
 
-This command is read-only. With no id it reports the active recording session, or else the newest `transcribing` session, or else `status: "none"`. To keep polling a session after it finishes, pass its id: once nothing is recording or transcribing, a bare `meet status` reports `none`.
+This command is read-only. With no id it reports the active recording session, or else the newest `transcribing` session, or else the newest `failed` session when it is newer than the newest `stopped` one, or else `status: "none"`. To keep polling a session after it finishes, pass its id: once it has stopped, a bare `meet status` reports `none`. A `failed` report carries a warning naming the error, the session's `finalize.log`, and the `comlink meet finalize <id>` retry command.
 
 ```json
 {
@@ -148,6 +148,7 @@ This command is read-only. With no id it reports the active recording session, o
 The codes in the table below are unchanged. The meeting-specific cases are:
 
 - `meet status` exits `0` for any readable state, including `none`. An unknown session id exits `1`.
+- `meet export` with no id exits `1` when the newest non-recording session is still `transcribing` or its finalize `failed`, instead of exporting an older meeting. The error names the session and the `meet status <id>` command.
 - Another comlink process holding the session's lifecycle lock exits `1` (`meeting session is busy`).
 - A detached finalizer that cannot be launched exits `1`, and the session is marked `failed`.
 - `meet finalize` exits with the underlying error's code, so a whisper.cpp failure exits `3`.
