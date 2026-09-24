@@ -119,6 +119,19 @@ if [ -z "$out" ]; then
   exit 2
 fi
 
+if [ -n "${COMLINK_MOCK_WHISPER_COUNTER:-}" ]; then
+  echo invoked >> "$COMLINK_MOCK_WHISPER_COUNTER"
+fi
+if [ -n "${COMLINK_MOCK_WHISPER_STARTED:-}" ]; then
+  touch "$COMLINK_MOCK_WHISPER_STARTED"
+fi
+if [ -n "${COMLINK_MOCK_WHISPER_BARRIER:-}" ]; then
+  for _ in $(seq 1 300); do
+    [ -f "$COMLINK_MOCK_WHISPER_BARRIER" ] && break
+    sleep 0.1
+  done
+fi
+
 name="$(basename "$wav" .wav)"
 source_label="$(basename "$(dirname "$wav")")"
 if [ "$source_label" = "chunks" ]; then
@@ -170,6 +183,30 @@ fi
             .env("COMLINK_MOCK_FAIL_CHUNKS", fail_chunks)
             .output()
             .unwrap()
+    }
+
+    fn run_env(&self, args: &[&str], chunks: u32, extra_env: &[(&str, &str)]) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_comlink"));
+        command
+            .args(args)
+            .env("COMLINK_HOME", &self.home)
+            .env("COMLINK_DATA_DIR", &self.data)
+            .env("COMLINK_FFMPEG", &self.ffmpeg)
+            .env("COMLINK_FFPROBE", &self.ffprobe)
+            .env("COMLINK_WHISPER_CPP", &self.whisper)
+            .env("COMLINK_WHISPER_MODEL", &self.model)
+            .env("COMLINK_LLM_ENABLED", "false")
+            .env("COMLINK_RECORD_DEVICE", ":0")
+            .env("COMLINK_MOCK_MEETING_CHUNKS", chunks.to_string())
+            .env("COMLINK_MOCK_DURATION_SECONDS", "30");
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        command.output().unwrap()
+    }
+
+    fn root(&self) -> PathBuf {
+        self.home.parent().unwrap().to_path_buf()
     }
 
     fn run_with_failed_input(&self, args: &[&str], fail_input: &str) -> Output {
@@ -578,6 +615,117 @@ fn meet_stop_clears_active_session_when_post_capture_asr_fails() {
         .join("meetings")
         .join("active-session")
         .exists());
+}
+
+/// Golden regression for the byte-level CLI contract of `meet start`, `meet
+/// stop`, and `meet export`. The fixtures under `tests/fixtures/meet/` were
+/// captured from the pre-refactor revision (97988d2) with:
+///
+/// ```bash
+/// COMLINK_UPDATE_GOLDENS=1 cargo test --test meet_lifecycle meet_cli_output_matches_golden_fixtures
+/// ```
+///
+/// Only nondeterministic values (temp root, session id, pids, times) are
+/// normalized; key order, nullability, and types are compared as raw text.
+#[test]
+fn meet_cli_output_matches_golden_fixtures() {
+    let runtime = MockRuntime::new();
+
+    let start = runtime.run(
+        &[
+            "meet",
+            "start",
+            "--format",
+            "json",
+            "--chunk-seconds",
+            "30",
+            "--no-llm",
+        ],
+        2,
+        "",
+    );
+    assert_success(&start);
+    let start_json = json_stdout(&start);
+    wait_for_chunks(Path::new(start_json["chunks_dir"].as_str().unwrap()), 2);
+    let session_id = start_json["session_id"].as_str().unwrap().to_string();
+
+    let stop = runtime.run(&["meet", "stop", &session_id, "--format", "json"], 2, "");
+    assert_success(&stop);
+    let export_json = runtime.run(&["meet", "export", &session_id, "--format", "json"], 2, "");
+    assert_success(&export_json);
+    let export_md = runtime.run(&["meet", "export", &session_id, "--format", "md"], 2, "");
+    assert_success(&export_md);
+
+    let root = runtime.root();
+    let cases = [
+        ("start.json", &start.stdout),
+        ("stop.json", &stop.stdout),
+        ("export.json", &export_json.stdout),
+        ("export.md", &export_md.stdout),
+    ];
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/meet");
+    for (name, stdout) in cases {
+        let actual = normalize_golden(&String::from_utf8_lossy(stdout), &root, &session_id);
+        let fixture = fixtures.join(name);
+        if std::env::var_os("COMLINK_UPDATE_GOLDENS").is_some() {
+            fs::create_dir_all(&fixtures).unwrap();
+            fs::write(&fixture, &actual).unwrap();
+            continue;
+        }
+        let expected = fs::read_to_string(&fixture)
+            .unwrap_or_else(|error| panic!("missing golden {}: {error}", fixture.display()));
+        assert_eq!(
+            actual, expected,
+            "golden mismatch for {name}; rerun with COMLINK_UPDATE_GOLDENS=1 only if the contract change is intended"
+        );
+    }
+}
+
+const GOLDEN_VOLATILE_JSON_KEYS: &[&str] = &[
+    "elapsed_ms",
+    "recorder_pid",
+    "pid",
+    "started_at_ms",
+    "stopped_at_ms",
+    "process_started_at",
+];
+
+fn normalize_golden(text: &str, root: &Path, session_id: &str) -> String {
+    let text = text
+        .replace(&root.display().to_string(), "<ROOT>")
+        .replace(session_id, "<SESSION>");
+    let mut normalized = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        normalized.push_str(&normalize_golden_line(line));
+    }
+    normalized
+}
+
+fn normalize_golden_line(line: &str) -> String {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    for key in GOLDEN_VOLATILE_JSON_KEYS {
+        let prefix = format!("\"{key}\": ");
+        if let Some(rest) = trimmed.strip_prefix(&prefix) {
+            if rest.trim_end().trim_end_matches(',') == "null" {
+                return line.to_string();
+            }
+            let comma = if rest.trim_end().ends_with(',') {
+                ","
+            } else {
+                ""
+            };
+            let newline = if line.ends_with('\n') { "\n" } else { "" };
+            return format!("{indent}{prefix}\"<V>\"{comma}{newline}");
+        }
+    }
+    for label in ["- **Started:** ", "- **Stopped:** "] {
+        if trimmed.starts_with(label) {
+            let newline = if line.ends_with('\n') { "\n" } else { "" };
+            return format!("{indent}{label}<V>{newline}");
+        }
+    }
+    line.to_string()
 }
 
 fn write_executable(path: &Path, contents: &str) {
