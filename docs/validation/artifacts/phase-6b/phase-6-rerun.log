@@ -1,0 +1,4 @@
+binary: cargo run --
+fixture: <repo>/tests/fixtures/audio/short.wav
+isolated COMLINK_HOME: /var/folders/7w/h2gk99w5289dq0bjvx2nb1_c0000gn/T/tmp.dcow1uAjvl/comlink-home
+Phase 6 E2E passed. Artifacts: <repo>/docs/validation/artifacts/phase-6

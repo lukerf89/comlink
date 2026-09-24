@@ -133,6 +133,43 @@ pub fn near_silent_warning_message(mean_dbfs: f64) -> String {
     )
 }
 
+/// Context for [`near_silent_device_hint`]. Callers gather the device list
+/// (best-effort) so this module stays free of subprocess/env I/O.
+#[derive(Debug, Clone, Copy)]
+pub struct DeviceHintContext<'a> {
+    /// AVFoundation selector actually used for capture (e.g. `:0`).
+    pub selector: &'a str,
+    /// Canonical device name, when known.
+    pub name: Option<&'a str>,
+    /// Enumerated AVFoundation audio devices, when the caller could list them.
+    pub available: Option<&'a [String]>,
+}
+
+/// Actionable remediation for a near-silent capture: names the device that was
+/// used, lists alternatives (or how to list them), and points at the override
+/// knobs and the macOS microphone permission pane. Pure; no I/O.
+pub fn near_silent_device_hint(ctx: DeviceHintContext<'_>) -> String {
+    let device = match ctx.name {
+        Some(name) => format!("{name} ({})", ctx.selector),
+        None => ctx.selector.to_string(),
+    };
+    let listing = match ctx.available {
+        Some(devices) if !devices.is_empty() => {
+            let entries = devices
+                .iter()
+                .enumerate()
+                .map(|(index, name)| format!(":{index} {name}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("available AVFoundation audio devices: {entries}")
+        }
+        _ => "list AVFoundation audio devices with `ffmpeg -f avfoundation -list_devices true -i \"\"`".to_string(),
+    };
+    format!(
+        "hint: captured from input device {device}; {listing}; pick another with COMLINK_RECORD_DEVICE=\":N\" or `comlink record --device :N`; check that the mic is not muted and that your terminal has access in System Settings > Privacy & Security > Microphone"
+    )
+}
+
 /// Read a 16-bit PCM WAV and accumulate its energy (sum of squares), peak
 /// amplitude, and sample count. Returns `None` when the file is missing,
 /// unreadable, or not 16-bit PCM (so measurement is best-effort and never a
@@ -433,6 +470,37 @@ mod tests {
         assert_eq!(loud.peak_abs, 20_000.0);
         let loud_level = session_audio_level([loud]).expect("level");
         assert!(!loud_level.is_near_silent());
+    }
+
+    #[test]
+    fn device_hint_lists_supplied_devices_and_override_knobs() {
+        let devices = vec![
+            "BlackHole 2ch".to_string(),
+            "MacBook Pro Microphone".to_string(),
+        ];
+        let hint = near_silent_device_hint(DeviceHintContext {
+            selector: ":0",
+            name: Some("BlackHole 2ch"),
+            available: Some(&devices),
+        });
+        assert!(hint.contains("BlackHole 2ch (:0)"));
+        assert!(hint.contains(":1 MacBook Pro Microphone"));
+        assert!(hint.contains("COMLINK_RECORD_DEVICE"));
+        assert!(hint.contains("--device"));
+        assert!(hint.contains("Privacy & Security > Microphone"));
+        assert!(!hint.contains("-list_devices"));
+    }
+
+    #[test]
+    fn device_hint_without_device_list_suggests_listing_command() {
+        let hint = near_silent_device_hint(DeviceHintContext {
+            selector: ":3",
+            name: None,
+            available: None,
+        });
+        assert!(hint.contains("input device :3;"));
+        assert!(hint.contains("-list_devices true"));
+        assert!(hint.contains("COMLINK_RECORD_DEVICE"));
     }
 
     #[test]

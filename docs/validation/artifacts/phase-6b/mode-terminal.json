@@ -1,0 +1,11 @@
+{
+  "raw_text": "cargo test, new line, git status.",
+  "final_text": "cargo test && git status",
+  "mode": "terminal",
+  "processing_steps": [
+    "deterministic-cleanup",
+    "vocabulary",
+    "snippets",
+    "terminal-formatting-preset"
+  ]
+}

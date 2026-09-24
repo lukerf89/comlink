@@ -35,6 +35,11 @@ pub enum ComlinkError {
     EmptyTranscript,
 
     #[error(
+        "no speech transcribed: captured audio from device {device} was near-silent ({mean_dbfs:.1} dBFS avg) - likely wrong input device, muted mic, or missing microphone permission; set COMLINK_RECORD_DEVICE or run `comlink doctor --probe-mic`"
+    )]
+    NoSpeechNearSilent { mean_dbfs: f64, device: String },
+
+    #[error(
         "recording too short or no speech detected: captured {duration_ms} ms, minimum is {min_duration_ms} ms"
     )]
     RecordingTooShort {
@@ -99,7 +104,9 @@ impl ComlinkError {
         match self {
             Self::ModelMissing | Self::ModelPathMissing(_) | Self::WhisperFailed(_) => 3,
             Self::AudioCaptureFailed(_) => 2,
-            Self::EmptyTranscript | Self::RecordingTooShort { .. } => 4,
+            Self::EmptyTranscript
+            | Self::NoSpeechNearSilent { .. }
+            | Self::RecordingTooShort { .. } => 4,
             Self::ClipboardFailed(_) => 5,
             _ => 1,
         }
@@ -119,6 +126,21 @@ mod tests {
 
         assert_eq!(error.exit_code(), 4);
         assert!(error.to_string().contains("recording too short"));
+    }
+
+    #[test]
+    fn near_silent_no_speech_keeps_exit_code_four_and_names_remediation() {
+        let error = ComlinkError::NoSpeechNearSilent {
+            mean_dbfs: -120.0,
+            device: ":0".to_string(),
+        };
+
+        assert_eq!(error.exit_code(), 4);
+        let message = error.to_string();
+        assert!(message.contains("near-silent"));
+        assert!(message.contains("-120.0 dBFS"));
+        assert!(message.contains("COMLINK_RECORD_DEVICE"));
+        assert!(message.contains("doctor --probe-mic"));
     }
 
     #[test]

@@ -20,7 +20,6 @@ use crate::{
     system_audio, text,
 };
 
-const DEFAULT_RECORD_DEVICE: &str = ":0";
 const DEFAULT_MIN_RECORDING_MS: u64 = 300;
 const DEFAULT_MEETING_CHUNK_SECONDS: u64 = 300;
 const DEFAULT_MEETING_STOP_TIMEOUT_SECONDS: u64 = 15;
@@ -41,6 +40,11 @@ enum Command {
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         format: ConfigFormat,
+
+        /// Run a short (1.5s) live microphone capture and report whether the
+        /// record input device has signal. Opt-in: touches the microphone.
+        #[arg(long)]
+        probe_mic: bool,
     },
 
     /// Inspect resolved local configuration.
@@ -429,8 +433,8 @@ pub fn run() -> Result<(), ComlinkError> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Doctor { format } => {
-            let healthy = doctor::run(format)?;
+        Command::Doctor { format, probe_mic } => {
+            let healthy = doctor::run(format, doctor::DoctorOptions { probe_mic })?;
             if healthy {
                 Ok(())
             } else {
@@ -545,7 +549,8 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
     let model_path =
         config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
     let runtime = deps::runtime_from_model_path(model_path)?;
-    let device = resolve_record_device(device, &runtime.ffmpeg)?;
+    let resolved_device = resolve_record_device_full(device, &runtime.ffmpeg)?;
+    let device = resolved_device.avfoundation_input.clone();
 
     eprintln!("Recording... press Enter to stop.");
     let captured = record::record_until_enter(record::RecordingOptions {
@@ -561,6 +566,20 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
         });
     }
 
+    // Best-effort level check: an unmeasurable WAV (None) keeps legacy behavior.
+    let level = audio::read_wav_level_samples(&captured.path)
+        .and_then(|samples| audio::session_audio_level([samples]));
+    let near_silent = record::diagnose_record_level(level);
+    let near_silent_warning = near_silent.map(|level| {
+        let warning = audio::near_silent_warning_message(level.mean_dbfs);
+        eprintln!("warning: {warning}");
+        eprintln!(
+            "{}",
+            record::near_silent_hint(&resolved_device, &runtime.ffmpeg)
+        );
+        warning
+    });
+
     let engine = WhisperCppEngine {
         binary: runtime.whisper_cpp,
         model: runtime.whisper_model,
@@ -571,7 +590,11 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
         normalized_channels: captured.channels,
     };
 
-    let transcript = engine.transcribe(&captured.path, source, captured.duration_ms)?;
+    let transcript = engine
+        .transcribe(&captured.path, source, captured.duration_ms)
+        .map_err(|error| {
+            record::map_empty_transcript(error, near_silent, &resolved_device.label())
+        })?;
     let mut transcript = output::TranscriptOutput::from_transcript(
         transcript,
         mode,
@@ -579,6 +602,9 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
         &resolved.config,
         no_llm,
     )?;
+    if let Some(warning) = near_silent_warning {
+        transcript.warnings.push(warning);
+    }
     let stop_to_final_ms = captured.stopped_at.elapsed().as_millis();
 
     if copy {
@@ -1061,42 +1087,31 @@ fn build_meeting_source_metadata(
     Ok(meet::MeetingSourceMetadata::new(mode, streams))
 }
 
-fn resolve_mic_device(device: &str, ffmpeg: &Path) -> Result<String, ComlinkError> {
-    system_audio::resolve_capture_device(device, ffmpeg)
-        .map(|resolved| resolved.avfoundation_input)
-        .map_err(ComlinkError::AudioCaptureFailed)
-}
-
-/// Resolve the microphone capture device for `record` / `meet start`.
-///
-/// Precedence: an explicit `--device`, then `COMLINK_RECORD_DEVICE`, then the
-/// system (CoreAudio) default input device, then the hardcoded `:0` fallback.
-/// Named selectors (an explicit name or the resolved system default) are mapped
-/// to their current AVFoundation index; numeric selectors pass through.
-fn resolve_record_device(device: Option<String>, ffmpeg: &Path) -> Result<String, ComlinkError> {
-    if let Some(requested) = device
-        .or_else(|| env::var("COMLINK_RECORD_DEVICE").ok())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
-        return resolve_mic_device(&requested, ffmpeg);
-    }
-
-    if let Some(matched) = system_audio::resolve_default_input_device(ffmpeg) {
-        match &matched.name {
+/// Resolve the microphone capture device for `record` / `meet start` via the
+/// shared [`record::resolve_record_device`] (same precedence `doctor` reports),
+/// announcing a resolved system default on stderr.
+fn resolve_record_device_full(
+    device: Option<String>,
+    ffmpeg: &Path,
+) -> Result<record::ResolvedRecordDevice, ComlinkError> {
+    let resolved = record::resolve_record_device(device, ffmpeg)?;
+    if resolved.source == record::DeviceSource::SystemDefault {
+        match &resolved.name {
             Some(name) => eprintln!(
                 "Using system default input device: {name} ({})",
-                matched.avfoundation_input
+                resolved.avfoundation_input
             ),
             None => eprintln!(
                 "Using system default input device {}",
-                matched.avfoundation_input
+                resolved.avfoundation_input
             ),
         }
-        return Ok(matched.avfoundation_input);
     }
+    Ok(resolved)
+}
 
-    Ok(DEFAULT_RECORD_DEVICE.to_string())
+fn resolve_record_device(device: Option<String>, ffmpeg: &Path) -> Result<String, ComlinkError> {
+    resolve_record_device_full(device, ffmpeg).map(|resolved| resolved.avfoundation_input)
 }
 
 fn resolve_system_audio_device(
