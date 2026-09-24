@@ -24,7 +24,7 @@ use crate::{
 };
 
 const DEFAULT_MIN_RECORDING_MS: u64 = 300;
-const DEFAULT_MEETING_CHUNK_SECONDS: u64 = 300;
+const DEFAULT_MEETING_CHUNK_SECONDS: u64 = meet_service::DEFAULT_CHUNK_SECONDS;
 const DEFAULT_MEETING_STOP_TIMEOUT_SECONDS: u64 = 15;
 const DEFAULT_FINALIZE_LOCK_WAIT_SECONDS: u64 = 30;
 
@@ -169,6 +169,10 @@ enum Command {
         #[command(subcommand)]
         command: MeetCommand,
     },
+
+    /// Run the local stdio MCP server for agents (Claude Code, Claude
+    /// Desktop). The MCP client launches this; stdout carries only JSON-RPC.
+    Mcp,
 }
 
 #[derive(Debug, Subcommand)]
@@ -178,6 +182,15 @@ enum ConfigCommand {
         /// Output format.
         #[arg(long, value_enum, default_value = "text")]
         format: ConfigFormat,
+    },
+
+    /// Set a persistent config value. Supported key: mcp.allow_start.
+    Set {
+        /// Config key (only `mcp.allow_start`).
+        key: String,
+
+        /// Value (`true`/`false`).
+        value: String,
     },
 }
 
@@ -519,6 +532,7 @@ pub fn run() -> Result<(), ComlinkError> {
             no_llm,
         }),
         Command::Meet { command } => run_meet(command),
+        Command::Mcp => crate::mcp::serve_stdio(),
     }
 }
 
@@ -665,9 +679,7 @@ fn record_memo(options: RecordMemoOptions<'_>) -> Result<(), ComlinkError> {
 }
 
 fn validate_requested_mode(config: &config::Config, mode: &str) -> Result<(), ComlinkError> {
-    text::resolve_mode(config, mode)
-        .map(|_| ())
-        .ok_or_else(|| ComlinkError::ModeNotFound(mode.to_string()))
+    text::validate_mode(config, mode)
 }
 
 fn run_config(command: ConfigCommand) -> Result<(), ComlinkError> {
@@ -675,6 +687,27 @@ fn run_config(command: ConfigCommand) -> Result<(), ComlinkError> {
         ConfigCommand::Show { format } => {
             let resolved = config::load(CliConfigOverrides::default())?;
             config::print(&resolved, format)
+        }
+        ConfigCommand::Set { key, value } => {
+            let outcome = config::set_key(&key, &value)?;
+            println!(
+                "set {}={} in {}",
+                outcome.key,
+                outcome.value,
+                outcome.config_file.display()
+            );
+            match outcome.env_override {
+                Some(env_value) if outcome.env_override_valid => eprintln!(
+                    "note: {}={env_value} is set in the environment and takes precedence over the config file",
+                    config::MCP_ALLOW_START_ENV
+                ),
+                Some(env_value) => eprintln!(
+                    "warning: {}={env_value} is set in the environment but is not a boolean; every comlink command (and the MCP server) will fail to load config until it is fixed or unset",
+                    config::MCP_ALLOW_START_ENV
+                ),
+                None => {}
+            }
+            Ok(())
         }
     }
 }
@@ -713,17 +746,14 @@ fn run_models(command: ModelsCommand) -> Result<(), ComlinkError> {
             if !path.is_file() {
                 return Err(ComlinkError::ModelPathMissing(path));
             }
-            let mut resolved = config::load_persistent()?;
             let path = path.canonicalize()?;
-            config::select_model(&mut resolved, &name, path);
-            config::save(&resolved.paths, &resolved.config)?;
+            let selected = config::update_persistent(|resolved| {
+                config::select_model(resolved, &name, path);
+                Ok(resolved.config.selected_model.clone())
+            })?;
             println!(
                 "selected model: {}",
-                resolved
-                    .config
-                    .selected_model
-                    .as_deref()
-                    .unwrap_or("<none>")
+                selected.as_deref().unwrap_or("<none>")
             );
             Ok(())
         }
@@ -746,16 +776,17 @@ fn run_modes(command: ModesCommand) -> Result<(), ComlinkError> {
             if text::TextMode::parse(&deterministic_mode).is_none() {
                 return Err(ComlinkError::ModeNotFound(deterministic_mode));
             }
-            let mut resolved = config::load_persistent()?;
-            config::upsert_mode(
-                &mut resolved.config,
-                name.clone(),
-                description,
-                Some(deterministic_mode),
-                Some(instruction),
-                style_profile,
-            );
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                config::upsert_mode(
+                    &mut resolved.config,
+                    name.clone(),
+                    description,
+                    Some(deterministic_mode),
+                    Some(instruction),
+                    style_profile,
+                );
+                Ok(())
+            })?;
             println!("saved mode: {name}");
             Ok(())
         }
@@ -775,11 +806,12 @@ fn run_modes(command: ModesCommand) -> Result<(), ComlinkError> {
             print_processed_text(&output, format)
         }
         ModesCommand::Remove { name } => {
-            let mut resolved = config::load_persistent()?;
-            if !config::remove_mode(&mut resolved.config, &name) {
-                return Err(ComlinkError::NotFound { kind: "mode", name });
-            }
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                if !config::remove_mode(&mut resolved.config, &name) {
+                    return Err(ComlinkError::NotFound { kind: "mode", name });
+                }
+                Ok(())
+            })?;
             println!("removed mode");
             Ok(())
         }
@@ -795,9 +827,10 @@ fn run_styles(command: StylesCommand) -> Result<(), ComlinkError> {
                 profile.name = name;
             }
             let profile_name = profile.name.clone();
-            let mut resolved = config::load_persistent()?;
-            config::upsert_style_profile(&mut resolved.config, profile);
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                config::upsert_style_profile(&mut resolved.config, profile);
+                Ok(())
+            })?;
             println!("saved style profile: {profile_name}");
             Ok(())
         }
@@ -814,9 +847,14 @@ fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
             phrase,
             replacement,
         } => {
-            let mut resolved = config::load_persistent()?;
-            config::upsert_vocabulary(&mut resolved.config, phrase.clone(), replacement.clone());
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                config::upsert_vocabulary(
+                    &mut resolved.config,
+                    phrase.clone(),
+                    replacement.clone(),
+                );
+                Ok(())
+            })?;
             println!("{phrase} -> {replacement}");
             Ok(())
         }
@@ -825,14 +863,15 @@ fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
             print_vocabulary(&resolved.config.vocabulary, format)
         }
         VocabCommand::Remove { phrase } => {
-            let mut resolved = config::load_persistent()?;
-            if !config::remove_vocabulary(&mut resolved.config, &phrase) {
-                return Err(ComlinkError::NotFound {
-                    kind: "vocabulary",
-                    name: phrase,
-                });
-            }
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                if !config::remove_vocabulary(&mut resolved.config, &phrase) {
+                    return Err(ComlinkError::NotFound {
+                        kind: "vocabulary",
+                        name: phrase,
+                    });
+                }
+                Ok(())
+            })?;
             println!("removed vocabulary phrase");
             Ok(())
         }
@@ -842,10 +881,11 @@ fn run_vocab(command: VocabCommand) -> Result<(), ComlinkError> {
 fn run_snippets(command: SnippetsCommand) -> Result<(), ComlinkError> {
     match command {
         SnippetsCommand::Add { trigger, body } => {
-            let mut resolved = config::load_persistent()?;
             let body = decode_cli_newlines(&body);
-            config::upsert_snippet(&mut resolved.config, trigger.clone(), body);
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                config::upsert_snippet(&mut resolved.config, trigger.clone(), body);
+                Ok(())
+            })?;
             println!("saved snippet: {trigger}");
             Ok(())
         }
@@ -854,14 +894,15 @@ fn run_snippets(command: SnippetsCommand) -> Result<(), ComlinkError> {
             print_snippets(&resolved.config.snippets, format)
         }
         SnippetsCommand::Remove { trigger } => {
-            let mut resolved = config::load_persistent()?;
-            if !config::remove_snippet(&mut resolved.config, &trigger) {
-                return Err(ComlinkError::NotFound {
-                    kind: "snippet",
-                    name: trigger,
-                });
-            }
-            config::save(&resolved.paths, &resolved.config)?;
+            config::update_persistent(|resolved| {
+                if !config::remove_snippet(&mut resolved.config, &trigger) {
+                    return Err(ComlinkError::NotFound {
+                        kind: "snippet",
+                        name: trigger,
+                    });
+                }
+                Ok(())
+            })?;
             println!("removed snippet");
             Ok(())
         }
@@ -877,6 +918,7 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
             let system_audio_report = system_audio::inspect(&dependencies);
             let meeting_audio =
                 meet_service::meeting_audio_audit(&MeetContext::new(resolved.clone(), None));
+            let mcp = meet_service::mcp_privacy(&resolved);
             let audit = PrivacyAudit {
                 history_enabled: resolved.config.history_enabled,
                 retention: resolved.config.retention.clone(),
@@ -906,6 +948,7 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
                     raw_audio_retained: resolved.config.retention.audio,
                 },
                 meeting_audio,
+                mcp,
             };
             print_privacy_audit(&audit, format)
         }
@@ -977,28 +1020,23 @@ fn meet_start(options: MeetStartOptions<'_>) -> Result<(), ComlinkError> {
         no_llm,
     } = options;
     let resolved = config::load(CliConfigOverrides { model })?;
-    validate_requested_mode(&resolved.config, mode)?;
-    let model_path =
-        config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
-    let runtime = deps::runtime_from_model_path(model_path)?;
-    let device = resolve_record_device(device, &runtime.ffmpeg)?;
-    let source_mode =
-        meet::MeetSourceMode::parse(source).ok_or_else(|| ComlinkError::InvalidConfigValue {
-            name: "meet start --source",
-            value: source.to_string(),
-        })?;
-    let ctx = MeetContext::new(resolved, Some(runtime));
-    let status = meet_service::start(
-        &ctx,
-        meet_service::StartRequest {
+    let prepared = meet_service::prepare_start(
+        &resolved,
+        None,
+        meet_service::StartOptions {
             mode: mode.to_string(),
+            source: source.to_string(),
             device,
-            source: source_mode,
             system_device,
             chunk_seconds,
             no_llm,
         },
     )?;
+    let (ctx, request, device_note) = prepared.into_context(resolved);
+    if let Some(note) = device_note {
+        eprintln!("{note}");
+    }
+    let status = meet_service::start(&ctx, request)?;
 
     eprintln!("{}", status.consent_reminder);
     print_meet_start(&status, format)
@@ -1025,10 +1063,6 @@ fn resolve_record_device_full(
         }
     }
     Ok(resolved)
-}
-
-fn resolve_record_device(device: Option<String>, ffmpeg: &Path) -> Result<String, ComlinkError> {
-    resolve_record_device_full(device, ffmpeg).map(|resolved| resolved.avfoundation_input)
 }
 
 struct MeetStopOptions {
@@ -1335,6 +1369,8 @@ struct PrivacyAudit {
     /// Meeting audio the retention policy does not keep. `clean` is false
     /// while any is listed or the scan hit an error.
     meeting_audio: meet_service::MeetingAudioAudit,
+    /// Local stdio MCP server posture (`comlink mcp`), beside `meeting_audio`.
+    mcp: meet_service::McpPrivacy,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1499,6 +1535,13 @@ fn print_privacy_audit(audit: &PrivacyAudit, format: ConfigFormat) -> Result<(),
                     scan_error.path, scan_error.reason
                 );
             }
+            println!(
+                "mcp: transport={} network_listener={} allow_start={} transcripts_sent_to_calling_model={}",
+                audit.mcp.transport,
+                audit.mcp.network_listener,
+                audit.mcp.allow_start,
+                audit.mcp.transcripts_sent_to_calling_model
+            );
         }
     }
     Ok(())

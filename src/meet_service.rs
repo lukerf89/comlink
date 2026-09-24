@@ -8,6 +8,7 @@
 //! consent reminder) are returned as data.
 
 use std::{
+    fmt,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -32,12 +33,17 @@ use crate::{
 pub const CONSENT_REMINDER: &str =
     "Consent reminder: confirm everyone present knows this meeting is being recorded and transcribed.";
 pub const DEFAULT_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+/// Chunk length for long-form capture (`meet start --chunk-seconds` default).
+pub const DEFAULT_CHUNK_SECONDS: u64 = 300;
 /// How long `finalize` waits for the lifecycle lock (the detaching parent holds
 /// it until the finalizer identity is recorded).
 pub const DEFAULT_FINALIZE_LOCK_WAIT: Duration = Duration::from_secs(30);
 const DETACH_LOCK_WAIT: Duration = Duration::from_secs(2);
 const RECORDER_SETTLE: Duration = Duration::from_millis(250);
 const FINALIZE_LOG_FILE: &str = "finalize.log";
+/// How long a start waits for a concurrent start to finish before reporting
+/// `meeting_lifecycle_busy`.
+const START_LOCK_WAIT: Duration = Duration::from_secs(10);
 
 /// Everything a meeting operation needs. `runtime` is injected by the CLI (or
 /// by tests); when `None`, operations resolve it from the session's model path
@@ -125,12 +131,20 @@ impl FinalizeLauncher for ProcessFinalizeLauncher {
         // Reap the finalizer when it exits. The thread only waits: it never
         // signals the child, and if this process exits first the finalizer is
         // reparented and keeps running, exactly as without the thread. If the
-        // thread cannot be spawned the child is left unreaped, as before.
-        let _ = std::thread::Builder::new()
+        // thread cannot be spawned the child is left unreaped (a zombie once
+        // it exits); that is recorded in the session's finalize.log, since
+        // this service never prints.
+        if let Err(error) = std::thread::Builder::new()
             .name("comlink-finalize-reaper".to_string())
             .spawn(move || {
                 let _ = child.wait();
-            });
+            })
+        {
+            append_finalize_log(
+                session,
+                &format!("could not start the finalizer reaper thread: {error}"),
+            );
+        }
         Ok(identity)
     }
 }
@@ -288,6 +302,129 @@ pub struct PipelineOutput {
 }
 
 // ---------------------------------------------------------------------------
+// prepare_start
+// ---------------------------------------------------------------------------
+
+/// Unresolved `meet start` / `meeting_start` inputs, as a user or agent gives
+/// them.
+#[derive(Debug, Clone)]
+pub struct StartOptions {
+    pub mode: String,
+    /// `mic-only`, `system-only` or `mic-plus-system`.
+    pub source: String,
+    /// Requested microphone device; `None` uses `COMLINK_RECORD_DEVICE`, then
+    /// the system default input, then `:0`.
+    pub device: Option<String>,
+    pub system_device: Option<String>,
+    pub chunk_seconds: u64,
+    pub no_llm: bool,
+}
+
+/// Returned when the microphone resolved to the system default input, so the
+/// caller can tell the user which device is being recorded. Its `Display` is
+/// the exact line `meet start` has always printed to stderr.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DeviceNote {
+    pub name: Option<String>,
+    pub avfoundation_input: String,
+}
+
+impl fmt::Display for DeviceNote {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.name {
+            Some(name) => write!(
+                f,
+                "Using system default input device: {name} ({})",
+                self.avfoundation_input
+            ),
+            None => write!(
+                f,
+                "Using system default input device {}",
+                self.avfoundation_input
+            ),
+        }
+    }
+}
+
+/// A validated start: the resolved request, the runtime it will use, and an
+/// optional device note.
+#[derive(Debug, Clone)]
+pub struct PreparedStart {
+    pub request: StartRequest,
+    pub runtime: RuntimeDeps,
+    pub device_note: Option<DeviceNote>,
+    /// The microphone the recorder will open and how it was selected, so a
+    /// caller that is not a terminal (the MCP server) can always report it.
+    pub input_device: record::ResolvedRecordDevice,
+}
+
+impl PreparedStart {
+    /// Build the context `start` runs in, carrying the runtime resolved by
+    /// [`prepare_start`] so dependencies are never resolved twice.
+    pub fn into_context(
+        self,
+        resolved: ResolvedConfig,
+    ) -> (MeetContext, StartRequest, Option<DeviceNote>) {
+        (
+            MeetContext::new(resolved, Some(self.runtime)),
+            self.request,
+            self.device_note,
+        )
+    }
+}
+
+/// Validate and resolve start inputs in the order `meet start` always has:
+/// mode, model path, runtime dependencies, microphone device, source. The
+/// first failure wins, with the same error variant as before. `runtime`
+/// injects already-resolved dependencies (tests, or a caller that resolved
+/// them); when `None` they are resolved from the selected model.
+pub fn prepare_start(
+    resolved: &ResolvedConfig,
+    runtime: Option<RuntimeDeps>,
+    options: StartOptions,
+) -> Result<PreparedStart, ComlinkError> {
+    let StartOptions {
+        mode,
+        source,
+        device,
+        system_device,
+        chunk_seconds,
+        no_llm,
+    } = options;
+    text::validate_mode(&resolved.config, &mode)?;
+    let runtime = match runtime {
+        Some(runtime) => runtime,
+        None => {
+            let model_path =
+                config::selected_model_path(&resolved.config).ok_or(ComlinkError::ModelMissing)?;
+            deps::runtime_from_model_path(model_path)?
+        }
+    };
+    let device = record::resolve_record_device(device, &runtime.ffmpeg)?;
+    let device_note = (device.source == record::DeviceSource::SystemDefault).then(|| DeviceNote {
+        name: device.name.clone(),
+        avfoundation_input: device.avfoundation_input.clone(),
+    });
+    let source = meet::MeetSourceMode::parse(&source).ok_or(ComlinkError::InvalidConfigValue {
+        name: "meet start --source",
+        value: source,
+    })?;
+    Ok(PreparedStart {
+        request: StartRequest {
+            mode,
+            device: device.avfoundation_input.clone(),
+            source,
+            system_device,
+            chunk_seconds,
+            no_llm,
+        },
+        runtime,
+        device_note,
+        input_device: device,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // start
 // ---------------------------------------------------------------------------
 
@@ -315,6 +452,8 @@ pub fn start(ctx: &MeetContext, request: StartRequest) -> Result<MeetStartStatus
         build_meeting_source_metadata(source, &device, system_device, &runtime.ffmpeg)?;
     let chunk_seconds = chunk_seconds.max(1);
     let store = ctx.store();
+    // Held until the new session is recording and is the active one.
+    let _start_lock = store.lock_start(START_LOCK_WAIT)?;
 
     if let Some(active_id) = store.active_session_id()? {
         match store.read_session(&active_id) {
@@ -1255,34 +1394,212 @@ pub fn export(
     kind: meet::MeetingExportKind,
 ) -> Result<String, ComlinkError> {
     let store = ctx.store();
-    let id = match id {
-        Some(id) => id,
-        None => {
-            let (sessions, _) = store.list_sessions()?;
-            let newest_finished = sessions
-                .into_iter()
-                .find(|session| session.status != MeetingStatus::Recording);
-            if let Some(session) = newest_finished {
-                match session.status {
-                    MeetingStatus::Transcribing => {
-                        return Err(ComlinkError::MeetingStillTranscribing(session.session_id))
-                    }
-                    MeetingStatus::Failed => {
-                        return Err(ComlinkError::MeetingFinalizeFailed(session.session_id))
-                    }
-                    _ => {}
-                }
+    let id = resolve_export_session_id(&store, id)?;
+    store.read_export(&id, kind)
+}
+
+/// The session an export or transcript read applies to. An explicit id is
+/// returned as is (the caller checks its status). With no id: the newest
+/// session that is not recording decides — `transcribing` is
+/// `MeetingStillTranscribing`, `failed` is `MeetingFinalizeFailed` — otherwise
+/// the newest stopped session, else `MeetingNotStopped` for an active
+/// recording, else `MeetingNoActiveSession`.
+fn resolve_export_session_id(
+    store: &meet::FileMeetingStore,
+    id: Option<String>,
+) -> Result<String, ComlinkError> {
+    if let Some(id) = id {
+        return Ok(id);
+    }
+    let (sessions, _) = store.list_sessions()?;
+    let newest_finished = sessions
+        .into_iter()
+        .find(|session| session.status != MeetingStatus::Recording);
+    if let Some(session) = newest_finished {
+        match session.status {
+            MeetingStatus::Transcribing => {
+                return Err(ComlinkError::MeetingStillTranscribing(session.session_id))
             }
-            if let Some(id) = store.latest_stopped_session_id()? {
-                id
-            } else if let Some(active_id) = store.active_session_id()? {
-                return Err(ComlinkError::MeetingNotStopped(active_id));
-            } else {
-                return Err(ComlinkError::MeetingNoActiveSession);
+            MeetingStatus::Failed => {
+                return Err(ComlinkError::MeetingFinalizeFailed(session.session_id))
             }
+            _ => {}
+        }
+    }
+    if let Some(id) = store.latest_stopped_session_id()? {
+        Ok(id)
+    } else if let Some(active_id) = store.active_session_id()? {
+        Err(ComlinkError::MeetingNotStopped(active_id))
+    } else {
+        Err(ComlinkError::MeetingNoActiveSession)
+    }
+}
+
+/// A stopped meeting's transcript plus the metadata an agent needs to judge
+/// it (warnings such as near-silent capture, audio level, retention).
+#[derive(Debug, Clone, Serialize)]
+pub struct TranscriptResult {
+    pub schema_version: &'static str,
+    pub session_id: String,
+    pub status: &'static str,
+    /// `md` or `json`.
+    pub format: &'static str,
+    /// Markdown export as a string, or the JSON export as an object.
+    pub content: serde_json::Value,
+    /// `retention.transcripts` at capture time. When false the export's
+    /// transcript text is null by design; this is not an error.
+    pub transcript_retained: bool,
+    pub warnings: Vec<String>,
+    pub audio_level: Option<meet::MeetingAudioLevel>,
+}
+
+/// Read a stopped session's transcript for an agent. Session selection is the
+/// same as [`export`]; a session that is not `stopped` is an error naming its
+/// state (`MeetingNotStopped` while recording, `MeetingStillTranscribing`, or
+/// `MeetingFinalizeFailedDetail` with the recorded error and the finalize
+/// remedy). Metadata always comes from the validated JSON export, so a missing
+/// or invalid JSON export is `MeetingExportUnavailable` even for `md`.
+pub fn transcript(
+    ctx: &MeetContext,
+    id: Option<String>,
+    kind: meet::MeetingExportKind,
+) -> Result<TranscriptResult, ComlinkError> {
+    let store = ctx.store();
+    let id = match resolve_export_session_id(&store, id) {
+        Ok(id) => id,
+        // The newest session failed: fall through so its recorded error (or
+        // why it cannot be read) is reported below, never a bare "unknown".
+        Err(ComlinkError::MeetingFinalizeFailed(id)) => id,
+        Err(error) => return Err(error),
+    };
+    // A corrupt or unreadable `session.json` names the session and file
+    // rather than surfacing as a bare `json`/`io` error.
+    let session = read_session_for_status(&store, &id)?;
+    match session.status {
+        MeetingStatus::Recording => return Err(ComlinkError::MeetingNotStopped(id)),
+        MeetingStatus::Transcribing => return Err(ComlinkError::MeetingStillTranscribing(id)),
+        MeetingStatus::Failed => {
+            let error = failed_session_error(&session);
+            return Err(ComlinkError::MeetingFinalizeFailedDetail { id, error });
+        }
+        MeetingStatus::Stopped => {}
+    }
+    check_transcript_confined(&store, &id, &session)?;
+    // The bytes validated are the bytes returned: both exports are read once,
+    // from the session's own directory, without following symlinks.
+    let json_bytes = read_transcript_file(&store, &id, meet::JSON_EXPORT_FILE)?;
+    let json_path = store.root().join(&id).join(meet::JSON_EXPORT_FILE);
+    let export = meet::FileMeetingStore::validate_export_bytes(&session, &json_path, &json_bytes)?;
+    let (format, content) = match kind {
+        meet::MeetingExportKind::Markdown => {
+            let bytes = read_transcript_file(&store, &id, meet::MARKDOWN_EXPORT_FILE)?;
+            let markdown = String::from_utf8(bytes).map_err(|error| {
+                ComlinkError::MeetingExportUnavailable(PathBuf::from(format!(
+                    "{} ({error})",
+                    store
+                        .root()
+                        .join(&id)
+                        .join(meet::MARKDOWN_EXPORT_FILE)
+                        .display()
+                )))
+            })?;
+            ("md", serde_json::Value::String(markdown))
+        }
+        meet::MeetingExportKind::Json => {
+            let value = serde_json::from_slice(&json_bytes).map_err(|error| {
+                ComlinkError::MeetingExportUnavailable(PathBuf::from(format!(
+                    "{} ({error})",
+                    json_path.display()
+                )))
+            })?;
+            ("json", value)
         }
     };
-    store.read_export(&id, kind)
+    Ok(TranscriptResult {
+        schema_version: meet::MEETING_SCHEMA_VERSION,
+        session_id: id,
+        status: MeetingStatus::Stopped.as_str(),
+        format,
+        content,
+        transcript_retained: export.retention.transcripts,
+        warnings: export.warnings,
+        audio_level: export.audio_level,
+    })
+}
+
+/// Transcript text goes to the calling model, so the files read must be this
+/// session's own: `session.json` must name the requested id, the session
+/// directory must not be a symlink, and both export paths (which are stored
+/// as absolute paths in `session.json`) must resolve inside that directory.
+fn check_transcript_confined(
+    store: &meet::FileMeetingStore,
+    id: &str,
+    session: &MeetingSessionState,
+) -> Result<(), ComlinkError> {
+    let dir = store.root().join(id);
+    let unreadable = |reason: String| ComlinkError::MeetingSessionUnreadable {
+        id: id.to_string(),
+        path: dir.join("session.json"),
+        reason,
+    };
+    if session.session_id != id {
+        return Err(unreadable(format!(
+            "session.json names session {:?}, not {id:?}",
+            session.session_id
+        )));
+    }
+    if fs::symlink_metadata(&dir)?.file_type().is_symlink() {
+        return Err(unreadable(
+            "the session directory is a symlink; transcripts are only read from inside the meeting store".to_string(),
+        ));
+    }
+    let canonical_dir = dir.canonicalize()?;
+    for path in [&session.json_export_path, &session.markdown_export_path] {
+        // A missing export is reported by the read that follows.
+        if let Ok(resolved) = Path::new(path).canonicalize() {
+            if !resolved.starts_with(&canonical_dir) {
+                return Err(ComlinkError::MeetingExportUnavailable(PathBuf::from(
+                    format!("{path} (outside the session directory {})", dir.display()),
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Read one of a session's export files with
+/// [`meet::FileMeetingStore::read_session_file_nofollow`]; any failure
+/// (missing, a symlink, not a regular file) is `MeetingExportUnavailable`.
+fn read_transcript_file(
+    store: &meet::FileMeetingStore,
+    id: &str,
+    name: &str,
+) -> Result<Vec<u8>, ComlinkError> {
+    store.read_session_file_nofollow(id, name).map_err(|error| {
+        let reason = if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
+            "a symlink; transcripts are only read from regular files in the session directory"
+                .to_string()
+        } else {
+            error.to_string()
+        };
+        ComlinkError::MeetingExportUnavailable(PathBuf::from(format!(
+            "{} ({reason})",
+            store.root().join(id).join(name).display()
+        )))
+    })
+}
+
+/// The recorded finalize error of a `failed` session. A failed session with
+/// no recorded error points at its `finalize.log` instead of reporting an
+/// unexplained failure.
+fn failed_session_error(session: &MeetingSessionState) -> String {
+    match session.error.as_deref().map(str::trim) {
+        Some(error) if !error.is_empty() => error.to_string(),
+        _ => format!(
+            "no error was recorded in session.json; see {}",
+            finalize_log_path(session).display()
+        ),
+    }
 }
 
 /// Every session in any status, newest first; unreadable session dirs are
@@ -1310,6 +1627,43 @@ pub fn list(ctx: &MeetContext) -> Result<MeetSessionList, ComlinkError> {
             })
             .collect(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// privacy: MCP server posture
+// ---------------------------------------------------------------------------
+
+/// What `privacy audit` and `doctor` report about the local MCP server.
+#[derive(Debug, Clone, Serialize)]
+pub struct McpPrivacy {
+    /// Always `stdio`: the MCP client launches `comlink mcp` as a subprocess.
+    pub transport: &'static str,
+    /// Always false: the server opens no network socket.
+    pub network_listener: bool,
+    /// `mcp.allow_start`: whether MCP clients may start a recording.
+    pub allow_start: bool,
+    /// Always true: transcript tools and resources return transcript text to
+    /// the calling model.
+    pub transcripts_sent_to_calling_model: bool,
+    pub note: String,
+}
+
+pub fn mcp_privacy(resolved: &ResolvedConfig) -> McpPrivacy {
+    let allow_start = resolved.config.mcp.allow_start;
+    let start = if allow_start {
+        "MCP clients may start recordings (mcp.allow_start=true)"
+    } else {
+        "MCP clients cannot start recordings until `comlink config set mcp.allow_start true`"
+    };
+    McpPrivacy {
+        transport: "stdio",
+        network_listener: false,
+        allow_start,
+        transcripts_sent_to_calling_model: true,
+        note: format!(
+            "`comlink mcp` is a local stdio server launched by the MCP client and opens no network listener; {start}; meeting_get_transcript and transcript resources send transcript text to the calling model"
+        ),
+    }
 }
 
 // ---------------------------------------------------------------------------

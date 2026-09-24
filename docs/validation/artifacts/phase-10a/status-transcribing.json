@@ -1,18 +1,18 @@
 {
   "schema_version": "comlink.meeting.v1",
-  "session_id": "s1790231185406637000-64769-0",
+  "session_id": "s1790236120129587000-87622-0",
   "status": "transcribing",
-  "elapsed_ms": 1048,
+  "elapsed_ms": 962,
   "recorders": [
     {
       "source_label": "user_mic",
       "device": ":0",
-      "pid": 64770,
+      "pid": 87623,
       "alive": false
     }
   ],
   "finalizer": {
-    "pid": 64861,
+    "pid": 87663,
     "alive": true
   },
   "chunk_count": 2,
@@ -21,5 +21,5 @@
   "stale": false,
   "stale_reason": null,
   "error": null,
-  "finalize_log": "<tmp>/comlink-data/meetings/s1790231185406637000-64769-0/finalize.log"
+  "finalize_log": "<tmp>/comlink-data/meetings/s1790236120129587000-87622-0/finalize.log"
 }

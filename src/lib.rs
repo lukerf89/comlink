@@ -7,6 +7,7 @@ pub mod deps;
 pub mod doctor;
 pub mod error;
 pub mod llm;
+pub mod mcp;
 pub mod meet;
 pub mod meet_service;
 pub mod output;

@@ -1,0 +1,197 @@
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "tools": [
+      {
+        "name": "meeting_get_transcript",
+        "description": "Return a stopped meeting's transcript as Markdown (`md`) or as the\n`comlink.meeting.v1` JSON export (`json`), with its warnings and audio\nlevel. Errors while the meeting is still recording or transcribing, if\nfinalize failed (with the error and a retry command), or if there is no\nmeeting. The transcript text is sent to you, the calling model.",
+        "inputSchema": {
+          "$defs": {
+            "TranscriptFormatArg": {
+              "description": "Transcript format.",
+              "oneOf": [
+                {
+                  "const": "md",
+                  "description": "Markdown export (a string).",
+                  "type": "string"
+                },
+                {
+                  "const": "json",
+                  "description": "JSON export (`comlink.meeting.v1` object).",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "format": {
+              "$ref": "#/$defs/TranscriptFormatArg",
+              "description": "`md` or `json`."
+            },
+            "id": {
+              "default": null,
+              "description": "Meeting session id. Omit for the newest stopped meeting (an error if a\nnewer meeting is still transcribing or failed).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "format"
+          ],
+          "type": "object"
+        },
+        "annotations": {
+          "title": "Get meeting transcript",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "meeting_list",
+        "description": "List meeting sessions, newest first, with id, status, start/stop time,\nduration and source mode. Unreadable session directories are listed\nunder `skipped`.",
+        "inputSchema": {
+          "properties": {},
+          "type": "object"
+        },
+        "annotations": {
+          "title": "List meetings",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "meeting_start",
+        "description": "Start recording a meeting locally. Requires the user to have run\n`comlink config set mcp.allow_start true`. The result includes a\nconsent reminder: tell the user, and make sure everyone present agrees\nto being recorded and transcribed. Only one meeting records at a time.",
+        "inputSchema": {
+          "$defs": {
+            "MeetingSourceArg": {
+              "description": "Meeting capture source.",
+              "oneOf": [
+                {
+                  "const": "mic-only",
+                  "description": "Microphone only (in-person meetings).",
+                  "type": "string"
+                },
+                {
+                  "const": "system-only",
+                  "description": "System audio only (requires BlackHole routing).",
+                  "type": "string"
+                },
+                {
+                  "const": "mic-plus-system",
+                  "description": "Microphone plus system audio, labelled separately (online meetings).",
+                  "type": "string"
+                }
+              ]
+            }
+          },
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "device": {
+              "default": null,
+              "description": "Microphone input by name (e.g. \"MacBook Pro Microphone\") or index\n(\":1\"). Defaults to COMLINK_RECORD_DEVICE, then the system default input.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "mode": {
+              "description": "Text mode for the final transcript, e.g. `raw`, `clean` or `memo`, or a\nconfigured custom mode.",
+              "type": "string"
+            },
+            "no_llm": {
+              "default": null,
+              "description": "Skip any configured local LLM rewrite (deterministic output only).",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "source": {
+              "$ref": "#/$defs/MeetingSourceArg",
+              "description": "Capture source: `mic-only`, `system-only` or `mic-plus-system`."
+            },
+            "system_device": {
+              "default": null,
+              "description": "System-audio (BlackHole) input by name or index. Defaults to\nCOMLINK_SYSTEM_AUDIO_DEVICE or a detected BlackHole device.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "source",
+            "mode"
+          ],
+          "type": "object"
+        },
+        "annotations": {
+          "title": "Start meeting recording",
+          "readOnlyHint": false,
+          "destructiveHint": false,
+          "idempotentHint": false,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "meeting_status",
+        "description": "Report a meeting's state: `recording`, `transcribing`, `stopped`,\n`failed`, or `none`. With no id: the active recording, else the newest\ntranscribing meeting, else a newer failed one. Includes recorder and\nfinalizer health, the latest audio level, `stale`/`stale_reason`, the\nfinalize `error` and `finalize_log`, and `warnings` (e.g. near-silent\ncapture). Poll this after meeting_stop until status is `stopped`.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "id": {
+              "default": null,
+              "description": "Meeting session id. Omit for the default session.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "annotations": {
+          "title": "Meeting status",
+          "readOnlyHint": true,
+          "destructiveHint": false,
+          "idempotentHint": true,
+          "openWorldHint": false
+        }
+      },
+      {
+        "name": "meeting_stop",
+        "description": "Stop the recording (the active one, or the given id) and return\nimmediately with status `transcribing`; transcription finishes in a\ndetached background process. Poll meeting_status until it reports\n`stopped` (or `failed`), then call meeting_get_transcript. When\nretention.audio is off, the audio chunks are deleted after\ntranscription.",
+        "inputSchema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "properties": {
+            "id": {
+              "default": null,
+              "description": "Meeting session id. Omit for the default session.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "type": "object"
+        },
+        "annotations": {
+          "title": "Stop meeting recording",
+          "readOnlyHint": false,
+          "destructiveHint": true,
+          "idempotentHint": false,
+          "openWorldHint": false
+        }
+      }
+    ]
+  }
+}

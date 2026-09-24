@@ -1,6 +1,9 @@
 use serde::Serialize;
 
-use crate::config::{Config, ModeEntry, SnippetEntry, StyleProfile, VocabularyEntry};
+use crate::{
+    config::{Config, ModeEntry, SnippetEntry, StyleProfile, VocabularyEntry},
+    error::ComlinkError,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -166,6 +169,15 @@ impl<'a> ResolvedMode<'a> {
         }
         steps
     }
+}
+
+/// Check that `mode` names a built-in or configured text mode. Shared by
+/// `transcribe`, `record`, `meet start` and the MCP `meeting_start` tool so an
+/// unknown mode fails the same way before any capture or ASR work starts.
+pub fn validate_mode(config: &Config, mode: &str) -> Result<(), ComlinkError> {
+    resolve_mode(config, mode)
+        .map(|_| ())
+        .ok_or_else(|| ComlinkError::ModeNotFound(mode.to_string()))
 }
 
 pub fn resolve_mode<'a>(config: &'a Config, name: &str) -> Option<ResolvedMode<'a>> {
@@ -692,6 +704,25 @@ mod tests {
             vocabulary,
             snippets,
         }
+    }
+
+    #[test]
+    fn validate_mode_accepts_builtin_and_custom_modes_and_rejects_unknown() {
+        let mut config = Config::default();
+        validate_mode(&config, "raw").unwrap();
+        validate_mode(&config, "memo").unwrap();
+        let error = validate_mode(&config, "nope").unwrap_err();
+        assert!(matches!(error, ComlinkError::ModeNotFound(ref mode) if mode == "nope"));
+        assert_eq!(error.to_string(), "text mode not found: nope");
+
+        config.modes.push(ModeEntry {
+            name: "standup".to_string(),
+            description: None,
+            deterministic_mode: Some("memo".to_string()),
+            llm_instruction: None,
+            style_profile: None,
+        });
+        validate_mode(&config, "standup").unwrap();
     }
 
     #[test]

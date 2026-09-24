@@ -1,0 +1,92 @@
+{
+  "audio_level": null,
+  "content": {
+    "artifacts": {
+      "chunks_dir": null,
+      "json_export": "<tmp>/comlink-data/meetings/s1790236116826783000-87347-0/transcript.json",
+      "markdown_export": "<tmp>/comlink-data/meetings/s1790236116826783000-87347-0/transcript.md",
+      "segments_jsonl": "<tmp>/comlink-data/meetings/s1790236116826783000-87347-0/segments.jsonl",
+      "session_dir": "<tmp>/comlink-data/meetings/s1790236116826783000-87347-0"
+    },
+    "final_text": "Phase 10b fixture segment 00000. Phase 10b fixture segment 00001.",
+    "processing_steps": [
+      "raw"
+    ],
+    "raw_text": "Phase 10b fixture segment 00000.\nPhase 10b fixture segment 00001.",
+    "retention": {
+      "audio": false,
+      "metadata": true,
+      "transcripts": true
+    },
+    "schema_version": "comlink.meeting.v1",
+    "segmenting": {
+      "detail": "ASR did not expose VAD segment timing; Comlink used capture chunk boundaries",
+      "strategy": "chunk-boundaries",
+      "vad_available": false
+    },
+    "segments": [
+      {
+        "chunk_index": 0,
+        "chunk_path": null,
+        "end_ms": 30000,
+        "segment_index": 0,
+        "source_device": ":0",
+        "source_label": "user_mic",
+        "start_ms": 0,
+        "text": "Phase 10b fixture segment 00000."
+      },
+      {
+        "chunk_index": 1,
+        "chunk_path": null,
+        "end_ms": 60000,
+        "segment_index": 1,
+        "source_device": ":0",
+        "source_label": "user_mic",
+        "start_ms": 30000,
+        "text": "Phase 10b fixture segment 00001."
+      }
+    ],
+    "session": {
+      "channels": 1,
+      "chunk_duration_ms": 300000,
+      "duration_ms": 60000,
+      "engine": "whisper.cpp",
+      "inactivity_auto_stop": {
+        "enabled": false,
+        "reason": "not enabled in Phase 7; the current capture adapter has no reliable realtime silence signal"
+      },
+      "mode": "raw",
+      "model": "<tmp>/mock-model.bin",
+      "sample_rate_hz": 16000,
+      "segment_count": 2,
+      "session_id": "s1790236116826783000-87347-0",
+      "source": "user_mic device :0",
+      "source_mode": "mic-only",
+      "source_streams": [
+        {
+          "device": ":0",
+          "label": "user_mic"
+        }
+      ],
+      "started_at_ms": 1790236116826,
+      "status": "stopped",
+      "stopped_at_ms": 1790236117488
+    },
+    "source": {
+      "mode": "mic-only",
+      "streams": [
+        {
+          "device": ":0",
+          "label": "user_mic"
+        }
+      ]
+    },
+    "warnings": []
+  },
+  "format": "json",
+  "schema_version": "comlink.meeting.v1",
+  "session_id": "s1790236116826783000-87347-0",
+  "status": "stopped",
+  "transcript_retained": true,
+  "warnings": []
+}

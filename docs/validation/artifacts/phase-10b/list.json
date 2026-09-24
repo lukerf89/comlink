@@ -1,0 +1,14 @@
+{
+  "sessions": [
+    {
+      "duration_ms": 60000,
+      "segment_count": 2,
+      "session_id": "s1790236116826783000-87347-0",
+      "source_mode": "mic-only",
+      "started_at_ms": 1790236116826,
+      "status": "stopped",
+      "stopped_at_ms": 1790236117488
+    }
+  ],
+  "skipped": []
+}

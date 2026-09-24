@@ -716,6 +716,14 @@ First Phase 10 sub-mission (groundwork for a later MCP server; no MCP code). The
 - Agent E2E: `scripts/e2e/phase-10a-meet-service.sh`.
 - Phase completion artifact: `docs/validation/phase-10a.md`.
 
+### Phase 10b: Local stdio MCP Server (`comlink mcp`)
+
+Second Phase 10 sub-mission. `comlink mcp` is a local stdio MCP server (official Rust SDK `rmcp`, stdio transport only, no network listener) for agent-driven meeting capture. It is a thin adapter over `src/meet_service.rs` with the tools `meeting_start`, `meeting_status`, `meeting_stop` (always detached), `meeting_get_transcript` and `meeting_list`, plus the resources `comlink://meetings/{id}/transcript.md` and `.json`. `meeting_start` is refused until the user runs `comlink config set mcp.allow_start true`. `privacy audit` and `doctor` report the MCP posture. Remote/HTTP transports and `transcribe_file` are out of scope.
+
+- Status: implemented; awaiting the manual pause gate.
+- Agent E2E: `scripts/e2e/phase-10b-mcp.sh`.
+- Phase completion artifact: `docs/validation/phase-10b.md`.
+
 ## Phase Acceptance Summary
 
 | Phase | Manual test checkpoint | Must pass before next phase |

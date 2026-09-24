@@ -3,17 +3,17 @@
 ## Session Metadata
 
 - **Schema:** comlink.meeting.v1
-- **Session:** s1790236120129587000-87622-0
+- **Session:** s1790236116826783000-87347-0
 - **Status:** stopped
-- **Started:** 1790236120129
-- **Stopped:** 1790236120325
+- **Started:** 1790236116826
+- **Stopped:** 1790236117488
 - **Duration:** 60000 ms
 - **Mode:** raw
 - **Source:** user_mic device :0
 - **Source mode:** mic-only
 - **Source stream:** user_mic: :0
 - **Source audio:** 16000 Hz, 1 channel(s)
-- **Chunk duration:** 30000 ms
+- **Chunk duration:** 300000 ms
 - **Engine:** whisper.cpp
 - **Model:** <tmp>/mock-model.bin
 - **Segment count:** 2
@@ -28,15 +28,15 @@
 
 ## Artifacts
 
-- **Segments JSONL:** <tmp>/comlink-data/meetings/s1790236120129587000-87622-0/segments.jsonl
-- **JSON export:** <tmp>/comlink-data/meetings/s1790236120129587000-87622-0/transcript.json
-- **Markdown export:** <tmp>/comlink-data/meetings/s1790236120129587000-87622-0/transcript.md
+- **Segments JSONL:** <tmp>/comlink-data/meetings/s1790236116826783000-87347-0/segments.jsonl
+- **JSON export:** <tmp>/comlink-data/meetings/s1790236116826783000-87347-0/transcript.json
+- **Markdown export:** <tmp>/comlink-data/meetings/s1790236116826783000-87347-0/transcript.md
 
 ## Final Transcript
 
-Phase 10a fixture segment 00000. Phase 10a fixture segment 00001.
+Phase 10b fixture segment 00000. Phase 10b fixture segment 00001.
 
 ## Segments
 
-- [00:00:00.000 - 00:00:30.000] user_mic: Phase 10a fixture segment 00000.
-- [00:00:30.000 - 00:01:00.000] user_mic: Phase 10a fixture segment 00001.
+- [00:00:00.000 - 00:00:30.000] user_mic: Phase 10b fixture segment 00000.
+- [00:00:30.000 - 00:01:00.000] user_mic: Phase 10b fixture segment 00001.

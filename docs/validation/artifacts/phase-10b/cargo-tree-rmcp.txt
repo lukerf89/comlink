@@ -1,0 +1,15 @@
+rmcp v3.4.1
+├── rmcp feature "macros"
+│   └── comlink v0.1.0 (<repo>)
+│       └── comlink feature "default" (command-line)
+├── rmcp feature "schemars"
+│   └── rmcp feature "server"
+│       └── comlink v0.1.0 (<repo>) (*)
+├── rmcp feature "server" (*)
+├── rmcp feature "transport-async-rw"
+│   ├── rmcp feature "server" (*)
+│   └── rmcp feature "transport-io"
+│       └── comlink v0.1.0 (<repo>) (*)
+├── rmcp feature "transport-io" (*)
+└── rmcp feature "uuid"
+    └── rmcp feature "server" (*)

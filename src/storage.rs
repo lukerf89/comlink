@@ -1,5 +1,6 @@
 use std::{
-    fs, io,
+    fs,
+    io::{self, Write},
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -13,6 +14,23 @@ use crate::{
     error::ComlinkError,
     output::TranscriptOutput,
 };
+
+/// Write `bytes` to `path` via a same-directory temp file and rename, so a
+/// reader or a crash never observes a partially written file. Used for meeting
+/// state and for the config file, which a long-lived `comlink mcp` server
+/// re-reads on every call.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ComlinkError> {
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    fs::create_dir_all(parent)?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)?;
+    temp.write_all(bytes)?;
+    temp.as_file().sync_all()?;
+    temp.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct StoredSession {

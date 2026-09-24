@@ -1,4 +1,7 @@
-use std::{env, fs, path::Path};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use serde::Serialize;
 
@@ -183,6 +186,10 @@ fn build_report_with(
         env::var("COMLINK_RECORD_DEVICE").ok(),
         options,
         probe,
+    ));
+    checks.extend(mcp_checks(
+        resolved,
+        env::current_exe().map_err(|error| error.to_string()),
     ));
 
     let ok = report_ok(&checks);
@@ -509,6 +516,57 @@ fn data_path_check(path: &Path) -> DoctorCheck {
     }
 }
 
+const MCP_TCC_NOTE: &str = "macOS microphone permission (TCC) belongs to the app that launches `comlink mcp`: your terminal for Claude Code, Claude.app for Claude Desktop. Grant it there, then run `comlink doctor --probe-mic` to confirm the input has signal; without permission recordings are near-silent and the agent sees a near-silent warning.";
+
+/// MCP section: the server binary and the `mcp.allow_start` opt-in. Both are
+/// informational (`required: false`, never `missing`/`bad`), so doctor stays
+/// green on a headless box.
+fn mcp_checks(resolved: &ResolvedConfig, exe: Result<PathBuf, String>) -> Vec<DoctorCheck> {
+    let exe_error = exe
+        .as_ref()
+        .err()
+        .map(|error| format!(" The comlink binary path could not be determined ({error}); substitute it in the registration command."))
+        .unwrap_or_default();
+    let exe = exe.ok();
+    let exe_display = exe
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "/path/to/comlink".to_string());
+    let server = DoctorCheck {
+        name: "mcp-server".to_string(),
+        status: if exe.is_some() { "ok" } else { "info" }.to_string(),
+        required: false,
+        path: exe.as_ref().map(|path| path.display().to_string()),
+        detail: format!(
+            "Local stdio MCP server: the MCP client launches `comlink mcp` as a subprocess; transport=stdio, no network listener. {MCP_TCC_NOTE}{exe_error}"
+        ),
+        remediation: format!(
+            "register with `claude mcp add comlink -- {exe_display} mcp` (see docs/local-dev.md for Claude Desktop); check mic permission with `comlink doctor --probe-mic`"
+        ),
+    };
+    let allow_start = resolved.config.mcp.allow_start;
+    let start = DoctorCheck {
+        name: "mcp-allow-start".to_string(),
+        status: if allow_start { "ok" } else { "info" }.to_string(),
+        required: false,
+        path: None,
+        detail: if allow_start {
+            "mcp.allow_start=true: MCP clients may start meeting recordings (clients should still ask before start/stop).".to_string()
+        } else {
+            format!(
+                "mcp.allow_start=false: MCP meeting_start is refused; status, stop, list and transcript reads still work. {} overrides the config file.",
+                config::MCP_ALLOW_START_ENV
+            )
+        },
+        remediation: if allow_start {
+            "enabled; disable with `comlink config set mcp.allow_start false`".to_string()
+        } else {
+            "enable with `comlink config set mcp.allow_start true`".to_string()
+        },
+    };
+    vec![server, start]
+}
+
 fn system_audio_check(report: &SystemAudioReport) -> DoctorCheck {
     DoctorCheck {
         name: "system-audio".to_string(),
@@ -701,6 +759,84 @@ mod tests {
             detail: String::new(),
             remediation: String::new(),
         }
+    }
+
+    fn resolved_with_allow_start(allow_start: bool) -> ResolvedConfig {
+        let mut config = config::Config::default();
+        config.mcp.allow_start = allow_start;
+        ResolvedConfig {
+            paths: config::ConfigPaths {
+                home_dir: PathBuf::from("/tmp/home"),
+                config_file: PathBuf::from("/tmp/home/config.json"),
+                data_dir: PathBuf::from("/tmp/data"),
+                database_file: PathBuf::from("/tmp/data/history.sqlite3"),
+                audio_dir: PathBuf::from("/tmp/data/audio"),
+            },
+            config,
+            sources: vec!["test".to_string()],
+        }
+    }
+
+    #[test]
+    fn mcp_checks_are_informational_and_never_fail_the_report() {
+        for allow_start in [false, true] {
+            for exe in [
+                Err("permission denied".to_string()),
+                Ok(PathBuf::from("/opt/comlink/bin/comlink")),
+            ] {
+                let checks = mcp_checks(&resolved_with_allow_start(allow_start), exe.clone());
+                assert_eq!(checks.len(), 2);
+                for check in &checks {
+                    assert!(!check.required, "{} must not be required", check.name);
+                    assert!(matches!(check.status.as_str(), "ok" | "info"));
+                }
+                assert!(report_ok(&checks));
+                let server = &checks[0];
+                assert_eq!(server.name, "mcp-server");
+                assert!(server.detail.contains("--probe-mic"));
+                assert!(server.detail.contains("Claude.app"));
+                assert!(server.remediation.contains("claude mcp add comlink --"));
+                match &exe {
+                    Ok(exe) => {
+                        assert_eq!(server.path.as_deref(), exe.to_str());
+                        assert!(server.remediation.contains("/opt/comlink/bin/comlink mcp"));
+                        assert!(!server.detail.contains("could not be determined"));
+                    }
+                    // The reason the path is a placeholder is shown.
+                    Err(_) => assert!(
+                        server
+                            .detail
+                            .contains("binary path could not be determined (permission denied)"),
+                        "{}",
+                        server.detail
+                    ),
+                }
+                let start = &checks[1];
+                assert_eq!(start.name, "mcp-allow-start");
+                if allow_start {
+                    assert_eq!(start.status, "ok");
+                } else {
+                    assert_eq!(start.status, "info");
+                    assert!(start
+                        .remediation
+                        .contains("comlink config set mcp.allow_start true"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn doctor_report_includes_mcp_section() {
+        let resolved = resolved_with_allow_start(false);
+        let dependencies = deps::inspect_with_model_path(None);
+        let report = build_report(&resolved, &dependencies);
+        let names: Vec<_> = report
+            .checks
+            .iter()
+            .map(|check| check.name.as_str())
+            .collect();
+        assert!(names.contains(&"mcp-server"));
+        assert!(names.contains(&"mcp-allow-start"));
     }
 
     #[test]

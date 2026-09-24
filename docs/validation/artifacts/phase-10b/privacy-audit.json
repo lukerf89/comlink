@@ -1,0 +1,35 @@
+{
+  "history_enabled": true,
+  "retention": {
+    "metadata": true,
+    "transcripts": true,
+    "audio": false
+  },
+  "config_file": "<tmp>/comlink-home/config.json",
+  "database_file": "<tmp>/comlink-data/history.sqlite3",
+  "selected_model": "<tmp>/mock-model.bin",
+  "selected_model_exists": true,
+  "asr": "local whisper.cpp",
+  "llm": "disabled; local LLM rewrite is opt-in",
+  "system_audio": {
+    "strategy": "blackhole-virtual-audio-device",
+    "available": false,
+    "status": "probe-error",
+    "device_name": null,
+    "microphone_permission": "Mic capture uses FFmpeg AVFoundation and requires the terminal or parent app to have macOS Microphone permission.",
+    "routing_permission": "BlackHole is not visible as a local audio input, so system audio cannot be captured through the Phase 9 adapter.",
+    "raw_audio_retained": false
+  },
+  "meeting_audio": {
+    "clean": true,
+    "unretained_leftovers": [],
+    "scan_errors": []
+  },
+  "mcp": {
+    "transport": "stdio",
+    "network_listener": false,
+    "allow_start": true,
+    "transcripts_sent_to_calling_model": true,
+    "note": "`comlink mcp` is a local stdio server launched by the MCP client and opens no network listener; MCP clients may start recordings (mcp.allow_start=true); meeting_get_transcript and transcript resources send transcript text to the calling model"
+  }
+}
