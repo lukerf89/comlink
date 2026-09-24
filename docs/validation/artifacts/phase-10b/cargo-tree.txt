@@ -152,17 +152,18 @@ comlink v0.1.0 (<repo>)
 │   │           └── zerocopy v0.8.52
 │   ├── libsqlite3-sys v0.30.1
 │   └── smallvec v1.15.2
+├── rustix v1.1.4
+│   ├── bitflags v2.13.0
+│   ├── errno v0.3.14
+│   │   └── libc v0.2.186
+│   └── libc v0.2.186
 ├── serde v1.0.228 (*)
 ├── serde_json v1.0.150 (*)
 ├── tempfile v3.27.0
 │   ├── fastrand v2.4.1
 │   ├── getrandom v0.4.3 (*)
 │   ├── once_cell v1.21.4
-│   └── rustix v1.1.4
-│       ├── bitflags v2.13.0
-│       ├── errno v0.3.14
-│       │   └── libc v0.2.186
-│       └── libc v0.2.186
+│   └── rustix v1.1.4 (*)
 ├── thiserror v1.0.69
 │   └── thiserror-impl v1.0.69 (proc-macro)
 │       ├── proc-macro2 v1.0.106 (*)

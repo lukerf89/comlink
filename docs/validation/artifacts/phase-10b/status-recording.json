@@ -1,7 +1,7 @@
 {
   "audio_level": null,
   "chunk_count": 2,
-  "elapsed_ms": 641,
+  "elapsed_ms": 656,
   "error": null,
   "finalize_log": null,
   "finalizer": null,
@@ -9,12 +9,12 @@
     {
       "alive": true,
       "device": ":0",
-      "pid": 69007,
+      "pid": 16843,
       "source_label": "user_mic"
     }
   ],
   "schema_version": "comlink.meeting.v1",
-  "session_id": "s1790234838429632000-69003-0",
+  "session_id": "s1790235399457859000-16839-0",
   "stale": false,
   "stale_reason": null,
   "status": "recording",

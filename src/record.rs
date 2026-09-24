@@ -552,10 +552,8 @@ pub fn stop_segmented_capture(
     identity: &SegmentedCaptureIdentity,
     timeout: Duration,
 ) -> Result<bool, ComlinkError> {
-    // From here on the process group is known to be the recorder's: its
-    // verified leader is alive, or processes recording this session's chunks
-    // are in it. A group id is never reused while any member lives, so the
-    // group stays the recorder's until it is empty.
+    // Each round re-verifies what it signals: the whole group while the
+    // verified leader is alive, else only verified capture pids.
     if !segmented_capture_is_running(identity) {
         return Ok(false);
     }
@@ -637,30 +635,52 @@ fn capture_leader_is_running(identity: &SegmentedCaptureIdentity) -> bool {
     )
 }
 
-/// Pids in the recorder's process group (group id = recorder pid) whose
-/// command line carries this session's chunk output pattern. The pattern is
-/// unique to the session directory, so an unrelated group that later reuses
-/// the id never matches.
+/// Pids in the recorder's process group (group id = recorder pid) recording
+/// this session's chunks: the chunk output pattern, unique to the session
+/// directory, is one of their arguments. An unrelated group that later reuses
+/// the id does not match.
 fn capture_group_members(identity: &SegmentedCaptureIdentity) -> Vec<u32> {
     if identity.pid == 0 {
         return Vec::new();
     }
-    let Ok(output) = system_command("/usr/bin/pgrep", "pgrep")
-        .args(["-g", &identity.pid.to_string()])
+    // One portable `ps` listing (pgrep's selector-only form is macOS-only).
+    let Ok(output) = system_command("/bin/ps", "ps")
+        .args(["-A", "-ww", "-o", "pid=,pgid=,command="])
         .stderr(Stdio::null())
         .output()
     else {
         return Vec::new();
     };
-    String::from_utf8_lossy(&output.stdout)
+    group_members_recording(
+        &String::from_utf8_lossy(&output.stdout),
+        identity.pid,
+        &identity.output_pattern,
+    )
+}
+
+/// Parse `ps -o pid=,pgid=,command=` lines: pids in group `pgid` whose command
+/// line has `pattern` as a whole argument (at the end, or followed by a
+/// space), not merely as a substring of a longer argument.
+fn group_members_recording(listing: &str, pgid: u32, pattern: &str) -> Vec<u32> {
+    listing
         .lines()
-        .filter_map(|line| line.trim().parse::<u32>().ok())
-        .filter(|pid| {
-            process_command(*pid).is_some_and(|command| command.contains(&identity.output_pattern))
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let (pid, rest) = line.split_once(char::is_whitespace)?;
+            let rest = rest.trim_start();
+            let (group, command) = rest.split_once(char::is_whitespace)?;
+            let pid = pid.parse::<u32>().ok()?;
+            (group.parse::<u32>().ok()? == pgid && command_has_argument(command.trim(), pattern))
+                .then_some(pid)
         })
         .collect()
 }
 
+fn command_has_argument(command: &str, argument: &str) -> bool {
+    command == argument
+        || command.ends_with(&format!(" {argument}"))
+        || command.contains(&format!(" {argument} "))
+}
 pub fn process_is_running(pid: u32) -> bool {
     if pid == 0 {
         return false;
@@ -726,24 +746,23 @@ fn stop_process_with_signal(
     identity: &SegmentedCaptureIdentity,
     signal: &str,
 ) -> Result<(), ComlinkError> {
-    if send_signal(signal, &format!("-{}", identity.pid))? {
-        return Ok(());
-    }
-    // No such group: a recorder started before recorders led their own
-    // group. Signal the verified leader and any verified capture process.
-    let mut targets = capture_group_members(identity);
-    if capture_leader_is_running(identity) && !targets.contains(&identity.pid) {
-        targets.push(identity.pid);
-    }
-    if targets.is_empty() {
-        return Ok(());
-    }
-    let mut status = true;
-    for pid in targets {
-        status &= send_signal(signal, &pid.to_string())?;
-    }
+    let leader_running = capture_leader_is_running(identity);
+    let members = capture_group_members(identity);
+    let delivered = match signal_plan(leader_running, identity.pid, &members) {
+        SignalPlan::Nothing => return Ok(()),
+        SignalPlan::Group(pgid) => {
+            // A group-led recorder; otherwise (a recorder started before
+            // recorders led their own group) fall back to the verified pids.
+            send_signal(signal, &format!("-{pgid}"))?
+                || send_each(
+                    signal,
+                    &verified_pids(leader_running, identity.pid, &members),
+                )?
+        }
+        SignalPlan::Each(pids) => send_each(signal, &pids)?,
+    };
 
-    if status || !segmented_capture_is_running(identity) {
+    if delivered || !segmented_capture_is_running(identity) {
         Ok(())
     } else {
         Err(ComlinkError::AudioCaptureFailed(format!(
@@ -753,6 +772,41 @@ fn stop_process_with_signal(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum SignalPlan {
+    Nothing,
+    /// The verified leader is alive, so its group id is the recorder's.
+    Group(u32),
+    /// The leader is gone: its group id could be reused once the group
+    /// empties, so only individually verified capture pids are signalled.
+    Each(Vec<u32>),
+}
+
+fn signal_plan(leader_running: bool, pgid: u32, members: &[u32]) -> SignalPlan {
+    if leader_running {
+        SignalPlan::Group(pgid)
+    } else if members.is_empty() {
+        SignalPlan::Nothing
+    } else {
+        SignalPlan::Each(members.to_vec())
+    }
+}
+
+fn verified_pids(leader_running: bool, leader: u32, members: &[u32]) -> Vec<u32> {
+    let mut pids = members.to_vec();
+    if leader_running && !pids.contains(&leader) {
+        pids.push(leader);
+    }
+    pids
+}
+
+fn send_each(signal: &str, pids: &[u32]) -> Result<bool, ComlinkError> {
+    let mut delivered = !pids.is_empty();
+    for pid in pids {
+        delivered &= send_signal(signal, &pid.to_string())?;
+    }
+    Ok(delivered)
+}
 /// `kill -<signal> -- <target>`; `target` is a pid, or `-<pgid>` for a
 /// process group. Returns whether the signal was delivered.
 fn send_signal(signal: &str, target: &str) -> Result<bool, ComlinkError> {
@@ -767,21 +821,15 @@ fn send_signal(signal: &str, target: &str) -> Result<bool, ComlinkError> {
         .map_err(|error| ComlinkError::AudioCaptureFailed(error.to_string()))
 }
 
-/// Whether any process is left in the recorder's process group (`kill -0` to
-/// the group). False when the recorder never led a group.
-fn recorder_group_alive(pgid: u32) -> bool {
-    send_signal("0", &format!("-{pgid}")).unwrap_or(false)
-}
-
-/// Stopped means the capture is gone and so is every process in its group
-/// (only called by a stop that verified the group is the recorder's).
+/// Stopped means neither the verified leader nor any verified capture
+/// process in its group is left.
 fn wait_until_stopped(
     identity: &SegmentedCaptureIdentity,
     timeout: Duration,
 ) -> Result<bool, ComlinkError> {
     let started = Instant::now();
     loop {
-        if !capture_leader_is_running(identity) && !recorder_group_alive(identity.pid) {
+        if !segmented_capture_is_running(identity) {
             return Ok(true);
         }
 
@@ -792,7 +840,6 @@ fn wait_until_stopped(
         thread::sleep(Duration::from_millis(50));
     }
 }
-
 fn process_start_time(pid: u32) -> Option<String> {
     let pid = pid.to_string();
     let output = system_command("/bin/ps", "ps")
@@ -829,6 +876,40 @@ fn system_command(absolute_path: &str, fallback_name: &str) -> Command {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn group_members_are_matched_by_group_and_whole_output_argument() {
+        let pattern =
+            "/Users/me/Library/Application Support/comlink/meetings/m1/chunks/chunk-%05d.wav";
+        let listing = format!(
+            "  101   101 /opt/homebrew/bin/ffmpeg -f avfoundation -i :0 {pattern}\n\
+               102   101 bash -c loop comlink-descendant {pattern} --flag\n\
+               103   101 tail -f {pattern}.bak\n\
+               104   999 /opt/homebrew/bin/ffmpeg -i :0 {pattern}\n\
+               105   101 vim notes.txt\n\
+               garbage line\n"
+        );
+        assert_eq!(
+            group_members_recording(&listing, 101, pattern),
+            vec![101, 102]
+        );
+        assert!(command_has_argument(pattern, pattern));
+        assert!(!command_has_argument(&format!("x {pattern}x"), pattern));
+    }
+
+    #[test]
+    fn only_a_verified_leader_makes_the_group_a_signal_target() {
+        assert_eq!(signal_plan(true, 101, &[]), SignalPlan::Group(101));
+        assert_eq!(signal_plan(true, 101, &[102]), SignalPlan::Group(101));
+        // Leader gone: never the (possibly reused) group id.
+        assert_eq!(
+            signal_plan(false, 101, &[102, 103]),
+            SignalPlan::Each(vec![102, 103])
+        );
+        assert_eq!(signal_plan(false, 101, &[]), SignalPlan::Nothing);
+        assert_eq!(verified_pids(true, 101, &[102]), vec![102, 101]);
+        assert_eq!(verified_pids(false, 101, &[102]), vec![102]);
+    }
+
     use std::time::Duration;
 
     use super::*;

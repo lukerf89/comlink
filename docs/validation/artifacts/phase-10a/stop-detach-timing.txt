@@ -1,1 +1,1 @@
-stop --detach wall time: 0.32s
+stop --detach wall time: 0.307s

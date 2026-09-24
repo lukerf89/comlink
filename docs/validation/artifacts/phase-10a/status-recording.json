@@ -1,13 +1,13 @@
 {
   "schema_version": "comlink.meeting.v1",
-  "session_id": "s1790234841521117000-69273-0",
+  "session_id": "s1790235402546986000-17043-0",
   "status": "recording",
-  "elapsed_ms": 168,
+  "elapsed_ms": 165,
   "recorders": [
     {
       "source_label": "user_mic",
       "device": ":0",
-      "pid": 69274,
+      "pid": 17044,
       "alive": true
     }
   ],

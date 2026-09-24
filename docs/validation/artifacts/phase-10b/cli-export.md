@@ -3,10 +3,10 @@
 ## Session Metadata
 
 - **Schema:** comlink.meeting.v1
-- **Session:** s1790234839711433000-69003-1
+- **Session:** s1790235400765498000-16839-1
 - **Status:** stopped
-- **Started:** 1790234839711
-- **Stopped:** 1790234840352
+- **Started:** 1790235400765
+- **Stopped:** 1790235401411
 - **Duration:** 60000 ms
 - **Mode:** raw
 - **Source:** user_mic device :0
@@ -29,9 +29,9 @@
 
 ## Artifacts
 
-- **Segments JSONL:** <tmp>/comlink-data/meetings/s1790234839711433000-69003-1/segments.jsonl
-- **JSON export:** <tmp>/comlink-data/meetings/s1790234839711433000-69003-1/transcript.json
-- **Markdown export:** <tmp>/comlink-data/meetings/s1790234839711433000-69003-1/transcript.md
+- **Segments JSONL:** <tmp>/comlink-data/meetings/s1790235400765498000-16839-1/segments.jsonl
+- **JSON export:** <tmp>/comlink-data/meetings/s1790235400765498000-16839-1/transcript.json
+- **Markdown export:** <tmp>/comlink-data/meetings/s1790235400765498000-16839-1/transcript.md
 
 ## Final Transcript
 
