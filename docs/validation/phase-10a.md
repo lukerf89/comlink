@@ -113,8 +113,66 @@ Results (in the LF-161 worktree, macOS, rustc 1.96.1):
 - The detached finalizer runs in its own process group, so it survives Ctrl-C and terminal hangup. It does not survive logout or reboot. After that, `meet status <id>` reports `stale: true`, and recovery is to run `comlink meet finalize <id>`.
 - The lifecycle lock is an advisory `flock`, which is not reliable on network filesystems. The data dir is expected to be local.
 - `stop --detach` still includes the existing 250ms recorder settle plus recorder shutdown before it returns.
-- For a session that the synchronous `meet stop` finished, `meet finalize <id>` reports `chunks_processed: 0`, because the synchronous path does not record it (its `session.json` is intentionally unchanged).
+- A synchronous `meet stop` whose ASR fails still leaves the session `stopped` with no exports (historical ordering, pinned by `sync_stop_asr_failure_leaves_stopped_without_exports_and_finalize_recovers`). A bare `meet status` reports `none` for it. `meet finalize <id>` now transcribes it, and with `retention.audio=false` `privacy audit` lists its kept chunks until then.
 - `finalize.log` and the `error` field contain only error display strings (paths and chunk indexes), never transcript text. A test asserts this for the whisper-failure case.
+
+## Fix Round (LF-161 review findings)
+
+### Changes
+
+- **F1 (privacy): cleanup before `stopped`.** Finalize now runs export, then deletes unretained chunks, then commits `stopped`. If the chunk delete fails, the session is marked `failed` with `meeting audio chunk cleanup failed ...` (new `MeetingChunkCleanupFailed`, exit 1), and a rerun recovers from the export with no ASR, retries the delete, and stops. On a `stopped` session with a valid export, `meet finalize` deletes chunks left while `retention.audio=false` (for example, from the old ordering) and regenerates any missing Markdown/JSONL first. Nothing is deleted while the session's `retention.audio` is `true`. `privacy audit` has a new `meeting_audio` object (`clean`, `unretained_leftovers`) listing every non-recording session that has retention off and chunk WAVs on disk.
+- **F2: finalizer reaping.** `ProcessFinalizeLauncher` hands the `Child` to a background thread that only calls `wait()`, so a long-lived caller never keeps zombies. The process group, the log redirection, and the survival of CLI exit, Ctrl-C and SIGHUP are unchanged: the thread never signals the child. `ProcessFinalizeLauncher::with_executable` lets a test launch a mock binary through the production path.
+- **F3a.** `meet status` returns `MeetingSessionUnreadable` (exit 1) instead of `none` when the named session, the active session, or (for a bare status with no recording or transcribing session) any session has a `session.json` that exists but cannot be parsed. Missing sessions and directories without `session.json` behave as before.
+- **F3b.** A failed save of the `failed` state no longer replaces the original error. The original error and its exit code are returned (a whisper failure still exits 3), and the save failure is appended to `finalize.log`. The launch-failure path does the same and also records the launch error in `finalize.log`.
+- **F3c.** `MeetStatusReport.finalize_log` (JSON and text) is the log path when the file exists, else `null`. The stale-`transcribing` reason and the `failed` warning reference it only when it exists.
+- **F3d.** Synchronous stop records `chunks_processed` in `session.json`. Its stdout is unchanged, and the goldens are byte-identical.
+
+### Tests added
+
+`tests/meet_service.rs`:
+- `finalize_cleanup_failure_is_not_stopped_and_rerun_cleans_up`
+- `stopped_session_with_leftover_chunks_is_cleaned_by_finalize`
+- `retained_audio_is_never_deleted_by_finalize`
+- `finalize_save_failure_keeps_the_original_error_and_logs_the_save_failure`
+- `sync_stop_records_chunks_processed_for_finalize`
+- `stop_detach_without_chunks_stops_and_launches_nothing`
+- `stop_that_lost_the_race_does_not_transcribe_or_launch_again`
+- `sync_stop_asr_failure_leaves_stopped_without_exports_and_finalize_recovers`
+- `status_surfaces_unreadable_session_instead_of_none`
+- `status_reports_finalize_log_and_references_it_in_warnings`
+- `process_launcher_reaps_the_finalizer_so_no_zombie_remains` (real child via the production launcher, `ps` state polled with a 20s bound)
+
+`tests/meet_lifecycle.rs`:
+- `meet_detach_and_finalize_text_output_and_status_finalize_log`
+- `privacy_audit_flags_leftover_meeting_audio_until_finalize_cleans_it`
+
+### Mutation checks (fix reverted, test red, restored, green)
+
+| Reverted | Failing test |
+|---|---|
+| F1: `stopped` saved before chunk delete, and the outer handler skips `failed` | `finalize_cleanup_failure_is_not_stopped_and_rerun_cleans_up` ("must not be stopped") |
+| F1: stopped fast path without cleanup | `stopped_session_with_leftover_chunks_is_cleaned_by_finalize`, `privacy_audit_flags_leftover_meeting_audio_until_finalize_cleans_it` |
+| F2: `Child` dropped without the reaper thread | `process_launcher_reaps_the_finalizer_so_no_zombie_remains` (`ps state "Z"`) |
+| F3a, F3b, F3c, F3d, the under-lock re-check, the no-chunks detach guard, the sync-stop recovery | the matching test above |
+
+### Commands and results
+
+```bash
+cargo fmt --check                              # ok
+cargo clippy --all-targets -- -D warnings      # ok
+cargo test --all                               # ok (meet_lifecycle 15, meet_service 23, stdout probe 0 bytes)
+cargo run -- doctor                            # ok
+cargo run -- meet status --format json         # status none, finalize_log null
+bash scripts/e2e/phase-10a-meet-service.sh     # passed
+cargo test --test meet_lifecycle --test meet_service   # 3 more runs, all green
+```
+
+### New known limitations
+
+- The cleanup-failure test makes a directory read-only, so it cannot fail as root. The suite is not run as root.
+- `privacy audit` does not look inside session directories whose `session.json` is unreadable. `meet status` reports those as errors instead.
+- If both the `failed` save and the `finalize.log` append fail (for example, on a read-only session directory with no existing log), the save failure is lost. The original error is still returned.
+- While a session is `failed` because of a cleanup failure, `meet export` refuses it until `meet finalize <id>` succeeds. The transcript files stay on disk.
 
 ## Manual Test Instructions (pause gate)
 
@@ -135,3 +193,4 @@ Use your normal config with a real microphone and whisper model.
 2. **Plain stop is unchanged.** Run `meet start`, speak briefly, then `meet stop`. Confirm it blocks until the transcript is written and prints the same fields as before.
 3. **Export is unchanged.** Run `cargo run -- meet export --format json` and `--format md` for the stopped session and confirm the output looks as it did before this phase.
 4. **Optional recovery check.** During a detached transcription, kill the finalizer with `kill -9 <finalizer_pid>`. Confirm `meet status <id>` shows `stale: true` with a `comlink meet finalize <id>` hint, then run that command and confirm it reaches `stopped`.
+5. **Privacy audit sees leftover meeting audio (fix round).** With `retention.audio` off, after a stopped meeting run `cargo run -- privacy audit` and confirm `meeting_audio: clean=true`. Copy any WAV into that session's `chunks/` directory, rerun the audit, and confirm `clean=false` with a `comlink meet finalize <id>` remedy. Run that command, then confirm the audit is clean again and the WAV is gone.

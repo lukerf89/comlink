@@ -1015,6 +1015,107 @@ fn meet_plain_stop_stays_synchronous() {
     assert_exports_match_golden(&runtime, id);
 }
 
+#[test]
+fn meet_detach_and_finalize_text_output_and_status_finalize_log() {
+    let runtime = MockRuntime::new();
+    let start_json = start_meeting(&runtime, 2);
+    let id = start_json["session_id"].as_str().unwrap();
+    let log = runtime.data.join("meetings").join(id).join("finalize.log");
+
+    // Default --format is text.
+    let stop = runtime.run(&["meet", "stop", id, "--detach"], 2, "");
+    assert_success(&stop);
+    let text = String::from_utf8_lossy(&stop.stdout);
+    for needle in [
+        format!("session_id: {id}\n"),
+        "status: transcribing\n".to_string(),
+        "chunk_count: 2\n".to_string(),
+        "finalizer_pid: ".to_string(),
+        format!("finalize_log: {}\n", log.display()),
+        "markdown_export: ".to_string(),
+    ] {
+        assert!(text.contains(&needle), "missing {needle:?} in:\n{text}");
+    }
+    assert!(serde_json::from_slice::<Value>(&stop.stdout).is_err());
+
+    let stopped = poll_status(&runtime, id, "stopped");
+    assert_eq!(stopped["finalize_log"], log.display().to_string());
+    let status_text = runtime.run(&["meet", "status", id], 0, "");
+    assert_success(&status_text);
+    assert!(String::from_utf8_lossy(&status_text.stdout)
+        .contains(&format!("finalize_log: {}\n", log.display())));
+
+    let finalize = runtime.run(&["meet", "finalize", id], 0, "");
+    assert_success(&finalize);
+    let text = String::from_utf8_lossy(&finalize.stdout);
+    for needle in [
+        format!("session_id: {id}\n"),
+        "status: stopped\n".to_string(),
+        "chunks_processed: 2\n".to_string(),
+        "segment_count: 2\n".to_string(),
+        "json_export: ".to_string(),
+        "retention: metadata=true, transcripts=true, audio=false\n".to_string(),
+    ] {
+        assert!(text.contains(&needle), "missing {needle:?} in:\n{text}");
+    }
+
+    // A synchronously stopped session has no finalize log: null.
+    let second = start_meeting(&runtime, 2);
+    let second_id = second["session_id"].as_str().unwrap();
+    assert_success(&runtime.run(&["meet", "stop", second_id, "--format", "json"], 2, ""));
+    assert!(status_json(&runtime, Some(second_id))["finalize_log"].is_null());
+}
+
+#[test]
+fn privacy_audit_flags_leftover_meeting_audio_until_finalize_cleans_it() {
+    let runtime = MockRuntime::new();
+    let audit = |runtime: &MockRuntime| {
+        let output = runtime.run(&["privacy", "audit", "--format", "json"], 0, "");
+        assert_success(&output);
+        json_stdout(&output)
+    };
+    assert_eq!(audit(&runtime)["meeting_audio"]["clean"], true);
+
+    let start_json = start_meeting(&runtime, 2);
+    let id = start_json["session_id"].as_str().unwrap();
+    assert_success(&runtime.run(&["meet", "stop", id, "--format", "json"], 2, ""));
+    let chunks_dir = PathBuf::from(start_json["chunks_dir"].as_str().unwrap());
+    assert!(!chunks_dir.exists(), "retention off deletes chunks on stop");
+    let clean = audit(&runtime);
+    assert_eq!(clean["meeting_audio"]["clean"], true);
+    assert_eq!(clean["retention"]["audio"], false);
+
+    // Chunks left behind by the old stopped-before-cleanup ordering.
+    fs::create_dir_all(&chunks_dir).unwrap();
+    fs::write(chunks_dir.join("chunk-00000.wav"), "leftover").unwrap();
+    let dirty = audit(&runtime);
+    assert_eq!(dirty["meeting_audio"]["clean"], false);
+    let leftovers = dirty["meeting_audio"]["unretained_leftovers"]
+        .as_array()
+        .unwrap();
+    assert_eq!(leftovers.len(), 1);
+    assert_eq!(leftovers[0]["session_id"], id);
+    assert_eq!(leftovers[0]["status"], "stopped");
+    assert_eq!(leftovers[0]["chunk_files"], 1);
+    let text = runtime.run(&["privacy", "audit"], 0, "");
+    assert_success(&text);
+    let text = String::from_utf8_lossy(&text.stdout);
+    assert!(
+        text.contains("meeting_audio: clean=false unretained_leftovers=1"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("comlink meet finalize {id}")),
+        "{text}"
+    );
+
+    let finalize = runtime.run(&["meet", "finalize", id, "--format", "json"], 0, "");
+    assert_success(&finalize);
+    assert!(!chunks_dir.exists(), "finalize deleted the leftovers");
+    assert_eq!(session_state(&runtime, id)["status"], "stopped");
+    assert_eq!(audit(&runtime)["meeting_audio"]["clean"], true);
+}
+
 /// Golden regression for the byte-level CLI contract of `meet start`, `meet
 /// stop`, and `meet export`. The fixtures under `tests/fixtures/meet/` were
 /// captured from the pre-refactor revision (97988d2) with:

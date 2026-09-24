@@ -101,6 +101,16 @@ pub enum ComlinkError {
     #[error("meeting session finalize failed: {0}; run `comlink meet status {0}`, then `comlink meet finalize {0}` to retry")]
     MeetingFinalizeFailed(String),
 
+    #[error("meeting audio chunk cleanup failed for {id} (retention.audio=false): {reason}; rerun `comlink meet finalize {id}`")]
+    MeetingChunkCleanupFailed { id: String, reason: String },
+
+    #[error("meeting session {id} is unreadable: {reason}; inspect or remove {path}")]
+    MeetingSessionUnreadable {
+        id: String,
+        path: PathBuf,
+        reason: String,
+    },
+
     #[error("{kind} not found: {name}")]
     NotFound { kind: &'static str, name: String },
 
@@ -192,6 +202,23 @@ mod tests {
         );
         assert_eq!(
             ComlinkError::MeetingFinalizeFailed("s1".to_string()).exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingChunkCleanupFailed {
+                id: "s1".to_string(),
+                reason: "denied".to_string(),
+            }
+            .exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingSessionUnreadable {
+                id: "s1".to_string(),
+                path: "s1/session.json".into(),
+                reason: "eof".to_string(),
+            }
+            .exit_code(),
             1
         );
         // Existing codes are unchanged, so a finalize that surfaces a whisper

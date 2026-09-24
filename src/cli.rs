@@ -875,6 +875,10 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
             let selected_model = config::selected_model_path(&resolved.config);
             let dependencies = deps::inspect_with_model_path(selected_model.clone());
             let system_audio_report = system_audio::inspect(&dependencies);
+            let meeting_leftovers = meet_service::unretained_audio_leftovers(&MeetContext::new(
+                resolved.clone(),
+                None,
+            ))?;
             let audit = PrivacyAudit {
                 history_enabled: resolved.config.history_enabled,
                 retention: resolved.config.retention.clone(),
@@ -902,6 +906,10 @@ fn run_privacy(command: PrivacyCommand) -> Result<(), ComlinkError> {
                     microphone_permission: system_audio_report.permissions.microphone.detail,
                     routing_permission: system_audio_report.permissions.system_audio_routing.detail,
                     raw_audio_retained: resolved.config.retention.audio,
+                },
+                meeting_audio: PrivacyMeetingAudio {
+                    clean: meeting_leftovers.is_empty(),
+                    unretained_leftovers: meeting_leftovers,
                 },
             };
             print_privacy_audit(&audit, format)
@@ -1329,6 +1337,15 @@ struct PrivacyAudit {
     asr: String,
     llm: String,
     system_audio: PrivacySystemAudio,
+    meeting_audio: PrivacyMeetingAudio,
+}
+
+/// Meeting chunk WAVs still on disk for sessions whose retention policy does
+/// not keep audio. `clean` is false while any remain.
+#[derive(Debug, Clone, Serialize)]
+struct PrivacyMeetingAudio {
+    clean: bool,
+    unretained_leftovers: Vec<meet_service::UnretainedMeetingAudio>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1470,6 +1487,21 @@ fn print_privacy_audit(audit: &PrivacyAudit, format: ConfigFormat) -> Result<(),
                 "system_audio_routing_permission: {}",
                 audit.system_audio.routing_permission
             );
+            println!(
+                "meeting_audio: clean={} unretained_leftovers={}",
+                audit.meeting_audio.clean,
+                audit.meeting_audio.unretained_leftovers.len()
+            );
+            for leftover in &audit.meeting_audio.unretained_leftovers {
+                println!(
+                    "meeting_audio_leftover: session={} status={} chunk_files={} chunks_dir={} remedy=`{}`",
+                    leftover.session_id,
+                    leftover.status,
+                    leftover.chunk_files,
+                    leftover.chunks_dir,
+                    leftover.remedy
+                );
+            }
         }
     }
     Ok(())
@@ -1616,6 +1648,9 @@ fn print_meet_status(report: &MeetStatusReport, format: ConfigFormat) -> Result<
             println!("stale: {}", report.stale);
             if let Some(error) = &report.error {
                 println!("error: {error}");
+            }
+            if let Some(log) = &report.finalize_log {
+                println!("finalize_log: {log}");
             }
             for warning in &report.warnings {
                 println!("warning: {warning}");

@@ -80,31 +80,7 @@ done
         write_executable(&ffprobe, "#!/usr/bin/env bash\nprintf '30\\n'\n");
         write_executable(
             &whisper,
-            &format!(
-                r#"#!/usr/bin/env bash
-set -euo pipefail
-echo invoked >> "{counter}"
-out=""
-wav=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    -of) shift; out="$1" ;;
-    -f) shift; wav="$1" ;;
-  esac
-  shift || true
-done
-name="$(basename "$wav" .wav)"
-index="${{name#chunk-}}"
-fail=",{fail},"
-if [[ "$fail" == *",$index,"* ]]; then
-  echo "mock whisper failed for $index" >&2
-  exit 7
-fi
-printf 'Meeting segment %s.\n' "$index" > "$out.txt"
-"#,
-                counter = whisper_counter.display(),
-                fail = options.fail_chunks
-            ),
+            &whisper_script(&whisper_counter, options.fail_chunks),
         );
         fs::write(&model, "mock model\n").unwrap();
 
@@ -154,6 +130,15 @@ printf 'Meeting segment %s.\n' "$index" > "$out.txt"
         })
     }
 
+    /// Rewrite the mock whisper so it fails for `fail_chunks` (comma-separated
+    /// chunk indexes such as `00000`); an empty string makes it healthy.
+    pub fn set_fail_chunks(&self, fail_chunks: &str) {
+        write_executable(
+            &self.runtime.whisper_cpp,
+            &whisper_script(&self.whisper_counter, fail_chunks),
+        );
+    }
+
     pub fn whisper_invocations(&self) -> usize {
         fs::read_to_string(&self.whisper_counter)
             .map(|text| text.lines().count())
@@ -187,6 +172,34 @@ printf 'Meeting segment %s.\n' "$index" > "$out.txt"
         meet_service::stop_detached(&ctx, None, Duration::from_secs(5)).unwrap();
         started.session_id
     }
+}
+
+fn whisper_script(counter: &Path, fail_chunks: &str) -> String {
+    format!(
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+echo invoked >> "{counter}"
+out=""
+wav=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -of) shift; out="$1" ;;
+    -f) shift; wav="$1" ;;
+  esac
+  shift || true
+done
+name="$(basename "$wav" .wav)"
+index="${{name#chunk-}}"
+fail=",{fail},"
+if [[ "$fail" == *",$index,"* ]]; then
+  echo "mock whisper failed for $index" >&2
+  exit 7
+fi
+printf 'Meeting segment %s.\n' "$index" > "$out.txt"
+"#,
+        counter = counter.display(),
+        fail = fail_chunks
+    )
 }
 
 /// Runs `finalize` on a thread, as a detached process would.
@@ -228,6 +241,25 @@ impl FinalizeLauncher for FailingLauncher {
             std::io::ErrorKind::NotFound,
             "mock spawn failure",
         )))
+    }
+}
+
+/// Counts launches without starting anything.
+#[derive(Default)]
+pub struct CountingLauncher {
+    pub launches: Mutex<usize>,
+}
+
+impl CountingLauncher {
+    pub fn count(&self) -> usize {
+        *self.launches.lock().unwrap()
+    }
+}
+
+impl FinalizeLauncher for CountingLauncher {
+    fn launch(&self, _session: &MeetingSessionState) -> Result<ProcessIdentity, ComlinkError> {
+        *self.launches.lock().unwrap() += 1;
+        Ok(record::process_identity(std::process::id()))
     }
 }
 

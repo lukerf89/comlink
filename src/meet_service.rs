@@ -53,7 +53,7 @@ impl MeetContext {
         Self {
             resolved,
             runtime,
-            launcher: Arc::new(ProcessFinalizeLauncher),
+            launcher: Arc::new(ProcessFinalizeLauncher::default()),
         }
     }
 
@@ -83,26 +83,55 @@ pub trait FinalizeLauncher: Send + Sync {
 
 /// Spawns `<current exe> meet finalize <id> --format json` in its own process
 /// group, with stdin/stdout closed and stderr appended to
-/// `<session_dir>/finalize.log`.
-pub struct ProcessFinalizeLauncher;
+/// `<session_dir>/finalize.log`. A background thread waits on the child so a
+/// long-lived caller never accumulates zombie finalizers.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessFinalizeLauncher {
+    executable: Option<PathBuf>,
+}
+
+impl ProcessFinalizeLauncher {
+    /// Launch `executable` instead of the current binary. It receives the same
+    /// arguments (`meet finalize <id> --format json`).
+    pub fn with_executable(executable: impl Into<PathBuf>) -> Self {
+        Self {
+            executable: Some(executable.into()),
+        }
+    }
+}
 
 impl FinalizeLauncher for ProcessFinalizeLauncher {
     fn launch(&self, session: &MeetingSessionState) -> Result<ProcessIdentity, ComlinkError> {
         use std::os::unix::process::CommandExt;
 
-        let exe = std::env::current_exe()?;
+        let exe = match &self.executable {
+            Some(executable) => executable.clone(),
+            None => std::env::current_exe()?,
+        };
         let log = OpenOptions::new()
             .create(true)
             .append(true)
             .open(finalize_log_path(session))?;
-        let child = Command::new(exe)
+        let mut child = Command::new(exe)
             .args(["meet", "finalize", &session.session_id, "--format", "json"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::from(log))
             .process_group(0)
             .spawn()?;
-        Ok(record::process_identity(child.id()))
+        // Read the identity before the reaper can collect the child, so the
+        // pid cannot have been reused yet.
+        let identity = record::process_identity(child.id());
+        // Reap the finalizer when it exits. The thread only waits: it never
+        // signals the child, and if this process exits first the finalizer is
+        // reparented and keeps running, exactly as without the thread. If the
+        // thread cannot be spawned the child is left unreaped, as before.
+        let _ = std::thread::Builder::new()
+            .name("comlink-finalize-reaper".to_string())
+            .spawn(move || {
+                let _ = child.wait();
+            });
+        Ok(identity)
     }
 }
 
@@ -209,6 +238,8 @@ pub struct MeetStatusReport {
     pub stale: bool,
     pub stale_reason: Option<String>,
     pub error: Option<String>,
+    /// `<session_dir>/finalize.log` when that file exists, else `null`.
+    pub finalize_log: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -419,14 +450,16 @@ pub fn stop_prepared(
     let pipeline = transcribe_session(&store, &session, &runtime, &ctx.resolved.config)?;
 
     session.mark_stopped(stopped_at_ms, pipeline.duration_ms, pipeline.segments.len());
+    session.chunks_processed = Some(pipeline.chunks.len());
     let export = export_from_pipeline(&session, &pipeline);
 
     store.save_session(&session)?;
     store.write_segments_jsonl(&export)?;
     store.write_exports(&export)?;
-    if !session.retention.audio {
-        store.delete_chunks(&session)?;
-    }
+    // The session is already `stopped` here (historical sync ordering). If
+    // cleanup fails, `meet finalize <id>` deletes the leftover chunks and
+    // `privacy audit` reports them until then.
+    delete_unretained_chunks(&store, &session)?;
 
     Ok(stop_status_from_export(
         &session,
@@ -498,11 +531,14 @@ pub fn stop_detached_prepared(
             })
         }
         Err(error) => {
-            session.mark_failed(format!("finalizer launch failed: {error}"));
-            store.save_session(&session)?;
-            store.clear_active_if_matches(&session.session_id)?;
+            let message = format!("finalizer launch failed: {error}");
+            let error = ComlinkError::MeetingFinalizeLaunchFailed(error.to_string());
+            append_finalize_log(&session, &message);
+            session.mark_failed(message);
+            record_failed_state(&store, &session, &error);
+            let _ = store.clear_active_if_matches(&session.session_id);
             drop(lock);
-            Err(ComlinkError::MeetingFinalizeLaunchFailed(error.to_string()))
+            Err(error)
         }
     }
 }
@@ -512,8 +548,11 @@ pub fn stop_detached_prepared(
 // ---------------------------------------------------------------------------
 
 /// Finish a `transcribing` (or `failed`) session: transcribe, write exports,
-/// commit `stopped`. Idempotent: on a `stopped` session it returns the same
-/// status rebuilt from the validated export without re-transcribing.
+/// delete unretained chunks, then commit `stopped`. Idempotent: on a `stopped`
+/// session with a valid export it returns the same status rebuilt from that
+/// export without re-transcribing, after deleting any chunks left behind while
+/// `retention.audio` is off. A `stopped` session with no valid export but with
+/// chunks on disk (a synchronous stop whose ASR failed) is transcribed.
 pub fn finalize(
     ctx: &MeetContext,
     id: &str,
@@ -527,26 +566,103 @@ pub fn finalize(
         MeetingStatus::Recording => {
             return Err(ComlinkError::MeetingNotTranscribing(id.to_string()))
         }
-        MeetingStatus::Stopped => {
-            let export = store.validate_export_for_recovery(&session)?;
-            let chunks_processed = session.chunks_processed.unwrap_or_default();
-            return Ok(stop_status_from_export(&session, export, chunks_processed));
-        }
+        MeetingStatus::Stopped => match store.validate_export_for_recovery(&session) {
+            Ok(export) => {
+                // Only after the export is validated on disk may chunks go;
+                // regenerate a missing Markdown/JSONL from it first.
+                if session_chunk_count(&store, &session)? > 0 && !session.retention.audio {
+                    if !Path::new(&session.markdown_export_path).is_file() {
+                        store.write_markdown_export(&export)?;
+                    }
+                    if !Path::new(&session.segments_jsonl_path).is_file() {
+                        store.write_segments_jsonl(&export)?;
+                    }
+                }
+                if let Err(error) = delete_unretained_chunks(&store, &session) {
+                    session.mark_failed(error.to_string());
+                    record_failed_state(&store, &session, &error);
+                    return Err(error);
+                }
+                let chunks_processed = session.chunks_processed.unwrap_or_default();
+                return Ok(stop_status_from_export(&session, export, chunks_processed));
+            }
+            Err(error) if session_chunk_count(&store, &session)? == 0 => return Err(error),
+            Err(_) => {}
+        },
         MeetingStatus::Transcribing | MeetingStatus::Failed => {}
     }
 
     match finalize_transcribing(ctx, &store, &mut session) {
         Ok(status) => Ok(status),
         Err(error) => {
-            // A failure after the stopped state was committed (e.g. chunk
-            // cleanup) must not demote the finished session.
-            if session.status != MeetingStatus::Stopped {
-                session.mark_failed(error.to_string());
-                store.save_session(&session)?;
-            }
+            // `stopped` is committed only as the last step, so any error here
+            // leaves the session unfinished: mark it failed for a rerun.
+            session.mark_failed(error.to_string());
+            record_failed_state(&store, &session, &error);
             Err(error)
         }
     }
+}
+
+/// Save a session just marked `failed`. The caller returns the original
+/// error; if the save itself fails, that failure is appended to the
+/// session's `finalize.log` instead of replacing the original error.
+fn record_failed_state(
+    store: &meet::FileMeetingStore,
+    session: &MeetingSessionState,
+    original: &ComlinkError,
+) {
+    if let Err(save_error) = store.save_session(session) {
+        append_finalize_log(
+            session,
+            &format!(
+                "could not record the failed state for {} ({save_error}); original error: {original}",
+                session.session_id
+            ),
+        );
+    }
+}
+
+/// Best-effort diagnostic line in `<session_dir>/finalize.log` (error text
+/// only, never transcript content).
+fn append_finalize_log(session: &MeetingSessionState, line: &str) {
+    use std::io::Write;
+
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(finalize_log_path(session))
+    {
+        let _ = file.write_all(format!("comlink meet finalize: {line}\n").as_bytes());
+    }
+}
+
+fn session_chunk_count(
+    store: &meet::FileMeetingStore,
+    session: &MeetingSessionState,
+) -> Result<usize, ComlinkError> {
+    Ok(store
+        .chunk_files(session)?
+        .iter()
+        .map(|(_, paths)| paths.len())
+        .sum())
+}
+
+/// Delete the session's chunk WAVs when its retention policy does not keep
+/// audio. A no-op when `retention.audio` is on. The error names the cleanup.
+fn delete_unretained_chunks(
+    store: &meet::FileMeetingStore,
+    session: &MeetingSessionState,
+) -> Result<(), ComlinkError> {
+    if session.retention.audio {
+        return Ok(());
+    }
+    store
+        .delete_chunks(session)
+        .map_err(|error| ComlinkError::MeetingChunkCleanupFailed {
+            id: session.session_id.clone(),
+            reason: error.to_string(),
+        })
 }
 
 fn finalize_transcribing(
@@ -554,11 +670,7 @@ fn finalize_transcribing(
     store: &meet::FileMeetingStore,
     session: &mut MeetingSessionState,
 ) -> Result<MeetStopStatus, ComlinkError> {
-    let chunk_count: usize = store
-        .chunk_files(session)?
-        .iter()
-        .map(|(_, paths)| paths.len())
-        .sum();
+    let chunk_count = session_chunk_count(store, session)?;
     let recovered = store.validate_export_for_recovery(session);
     let artifacts_complete = Path::new(&session.markdown_export_path).is_file()
         && Path::new(&session.segments_jsonl_path).is_file();
@@ -598,13 +710,13 @@ fn finalize_transcribing(
     let export = export_from_pipeline(&snapshot, &pipeline);
     store.write_segments_jsonl(&export)?;
     store.write_exports(&export)?;
+    // Exports are on disk; unretained audio goes before `stopped` is
+    // committed, so a cleanup failure leaves the session retryable.
+    delete_unretained_chunks(store, session)?;
 
     *session = snapshot;
     session.chunks_processed = Some(chunks_processed);
     store.save_session(session)?;
-    if !session.retention.audio {
-        store.delete_chunks(session)?;
-    }
 
     Ok(stop_status_from_export(session, export, chunks_processed))
 }
@@ -616,6 +728,8 @@ fn recover_from_export(
 ) -> Result<MeetStopStatus, ComlinkError> {
     store.write_segments_jsonl(&export)?;
     store.write_markdown_export(&export)?;
+    // The validated JSON export and the rewritten artifacts are on disk.
+    delete_unretained_chunks(store, session)?;
     let chunks_processed = session.chunks_processed.unwrap_or_default();
     session.mark_stopped(
         export
@@ -628,9 +742,6 @@ fn recover_from_export(
     );
     session.chunks_processed = Some(chunks_processed);
     store.save_session(session)?;
-    if !session.retention.audio {
-        store.delete_chunks(session)?;
-    }
     Ok(stop_status_from_export(session, export, chunks_processed))
 }
 
@@ -746,7 +857,7 @@ fn stop_status_from_export(
 pub fn status(ctx: &MeetContext, id: Option<String>) -> Result<MeetStatusReport, ComlinkError> {
     let store = ctx.store();
     let session = match id {
-        Some(id) => Some(store.read_session(&id)?),
+        Some(id) => Some(read_session_for_status(&store, &id)?),
         None => resolve_default_status_session(&store)?,
     };
     let Some(session) = session else {
@@ -763,27 +874,64 @@ pub fn status(ctx: &MeetContext, id: Option<String>) -> Result<MeetStatusReport,
             stale: false,
             stale_reason: None,
             error: None,
+            finalize_log: None,
         });
     };
     session_status_report(&store, &session)
 }
 
+/// `read_session`, but a `session.json` that exists and cannot be read or
+/// parsed is reported as [`ComlinkError::MeetingSessionUnreadable`]. A missing
+/// session stays `MeetingSessionNotFound`.
+fn read_session_for_status(
+    store: &meet::FileMeetingStore,
+    id: &str,
+) -> Result<MeetingSessionState, ComlinkError> {
+    store.read_session(id).map_err(|error| match error {
+        ComlinkError::MeetingSessionNotFound(_) => error,
+        other => ComlinkError::MeetingSessionUnreadable {
+            id: id.to_string(),
+            path: store.root().join(id).join("session.json"),
+            reason: other.to_string(),
+        },
+    })
+}
+
+/// Default session for a bare `meet status`: the active recording session,
+/// else the newest `transcribing` one, else the newest `failed` one when it is
+/// newer than the newest `stopped` one, else none. A session whose
+/// `session.json` exists but cannot be read is an error rather than `none`,
+/// because its status is unknown. A session directory without a
+/// `session.json` (and an active pointer to a missing session) is ignored.
 fn resolve_default_status_session(
     store: &meet::FileMeetingStore,
 ) -> Result<Option<MeetingSessionState>, ComlinkError> {
     if let Some(active_id) = store.active_session_id()? {
-        if let Ok(session) = store.read_session(&active_id) {
-            if session.status == MeetingStatus::Recording {
-                return Ok(Some(session));
-            }
+        match read_session_for_status(store, &active_id) {
+            Ok(session) if session.status == MeetingStatus::Recording => return Ok(Some(session)),
+            Ok(_) | Err(ComlinkError::MeetingSessionNotFound(_)) => {}
+            Err(error) => return Err(error),
         }
     }
-    let (sessions, _) = store.list_sessions()?;
+    let (sessions, skipped) = store.list_sessions()?;
     if let Some(session) = sessions
         .iter()
         .find(|session| session.status == MeetingStatus::Transcribing)
     {
         return Ok(Some(session.clone()));
+    }
+    if let Some((dir, reason)) = skipped
+        .iter()
+        .find(|(dir, _)| dir.join("session.json").is_file())
+    {
+        return Err(ComlinkError::MeetingSessionUnreadable {
+            id: dir
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            path: dir.join("session.json"),
+            reason: reason.clone(),
+        });
     }
     // A failed finalize must not read as "nothing happening": surface the
     // newest `failed` session when it is newer than the newest stopped one.
@@ -814,13 +962,21 @@ fn session_status_report(
             ),
         });
     let locked = store.is_session_locked(&session.session_id)?;
-    let (stale, stale_reason) = classify_stale(
+    let log_path = finalize_log_path(session);
+    let finalize_log = log_path.is_file().then(|| log_path.display().to_string());
+    let (stale, mut stale_reason) = classify_stale(
         session.status,
         recorders.iter().any(|recorder| recorder.alive),
         locked,
         finalizer.as_ref().is_some_and(|finalizer| finalizer.alive),
         &session.session_id,
     );
+
+    if let (Some(reason), Some(log)) = (stale_reason.as_mut(), finalize_log.as_deref()) {
+        if session.status == MeetingStatus::Transcribing {
+            reason.push_str(&format!("; see {log}"));
+        }
+    }
 
     let chunk_files = store.chunk_files(session)?;
     let chunk_count = chunk_files.iter().map(|(_, paths)| paths.len()).sum();
@@ -848,7 +1004,7 @@ fn session_status_report(
         warnings.push(reason.clone());
     }
     if session.status == MeetingStatus::Failed {
-        warnings.push(failed_session_warning(session));
+        warnings.push(failed_session_warning(session, finalize_log.as_deref()));
     }
 
     Ok(MeetStatusReport {
@@ -864,15 +1020,18 @@ fn session_status_report(
         stale,
         stale_reason,
         error: session.error.clone(),
+        finalize_log,
     })
 }
 
-fn failed_session_warning(session: &MeetingSessionState) -> String {
+fn failed_session_warning(session: &MeetingSessionState, finalize_log: Option<&str>) -> String {
     let id = &session.session_id;
+    let see_log = finalize_log
+        .map(|log| format!("; see {log}"))
+        .unwrap_or_default();
     format!(
-        "finalize failed: {}; see {}; rerun `comlink meet finalize {id}`",
+        "finalize failed: {}{see_log}; rerun `comlink meet finalize {id}`",
         session.error.as_deref().unwrap_or("unknown error"),
-        finalize_log_path(session).display()
     )
 }
 
@@ -1035,6 +1194,51 @@ pub fn list(ctx: &MeetContext) -> Result<MeetSessionList, ComlinkError> {
             })
             .collect(),
     })
+}
+
+// ---------------------------------------------------------------------------
+// privacy: leftover unretained audio
+// ---------------------------------------------------------------------------
+
+/// A meeting whose retention policy does not keep audio but whose chunk WAVs
+/// are still on disk.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnretainedMeetingAudio {
+    pub session_id: String,
+    pub status: &'static str,
+    pub chunk_files: usize,
+    pub chunks_dir: String,
+    pub remedy: String,
+}
+
+/// Every non-recording session with `retention.audio = false` that still has
+/// chunk WAVs on disk: a finished session whose cleanup failed or predates the
+/// cleanup-before-stopped ordering, a `failed` one awaiting a rerun, or one
+/// still `transcribing`. `recording` sessions are excluded because their
+/// chunks are the capture in progress.
+pub fn unretained_audio_leftovers(
+    ctx: &MeetContext,
+) -> Result<Vec<UnretainedMeetingAudio>, ComlinkError> {
+    let store = ctx.store();
+    let (sessions, _) = store.list_sessions()?;
+    let mut leftovers = Vec::new();
+    for session in sessions {
+        if session.retention.audio || session.status == MeetingStatus::Recording {
+            continue;
+        }
+        let chunk_files = session_chunk_count(&store, &session)?;
+        if chunk_files == 0 {
+            continue;
+        }
+        leftovers.push(UnretainedMeetingAudio {
+            remedy: format!("comlink meet finalize {}", session.session_id),
+            status: session.status.as_str(),
+            chunks_dir: session.chunks_dir.clone(),
+            session_id: session.session_id,
+            chunk_files,
+        });
+    }
+    Ok(leftovers)
 }
 
 // ---------------------------------------------------------------------------

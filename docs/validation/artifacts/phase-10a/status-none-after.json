@@ -10,5 +10,6 @@
   "warnings": [],
   "stale": false,
   "stale_reason": null,
-  "error": null
+  "error": null,
+  "finalize_log": null
 }
