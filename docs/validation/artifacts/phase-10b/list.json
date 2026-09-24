@@ -3,11 +3,11 @@
     {
       "duration_ms": 60000,
       "segment_count": 2,
-      "session_id": "s1790233071990312000-80424-0",
+      "session_id": "s1790234838429632000-69003-0",
       "source_mode": "mic-only",
-      "started_at_ms": 1790233071990,
+      "started_at_ms": 1790234838429,
       "status": "stopped",
-      "stopped_at_ms": 1790233072645
+      "stopped_at_ms": 1790234839074
     }
   ],
   "skipped": []

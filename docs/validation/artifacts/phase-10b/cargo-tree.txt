@@ -1,4 +1,4 @@
-comlink v0.1.0 (/private<repo>)
+comlink v0.1.0 (<repo>)
 ├── clap v4.6.1
 │   ├── clap_builder v4.6.0
 │   │   ├── anstream v1.0.0

@@ -226,7 +226,7 @@ Markdown itself. There is no `outputSchema`.
 
 | Tool | Input | `structuredContent` on success |
 | --- | --- | --- |
-| `meeting_start` | `source` (`mic-only` \| `system-only` \| `mic-plus-system`, required), `mode` (required), `device?`, `system_device?`, `no_llm?` | the `meet start --format json` object (`comlink.meeting.v1`). The first text block is the consent reminder, which the agent should pass on; when the system default input was used, the next block names it. |
+| `meeting_start` | `source` (`mic-only` \| `system-only` \| `mic-plus-system`, required), `mode` (required), `device?`, `system_device?`, `no_llm?` | the `meet start --format json` object (`comlink.meeting.v1`) plus `input_device` (`{avfoundation_input, name, selected_by}`, where `selected_by` is `--device`, `COMLINK_RECORD_DEVICE`, `system default input` or `fallback`; `null` for `system-only`). The first text block is the consent reminder, which the agent should pass on; the next names the microphone being recorded. |
 | `meeting_status` | `id?` | the `meet status --format json` object, all fields included: `stale`, `stale_reason`, `error`, `finalize_log`, `warnings`, `audio_level`, `recorders`, `finalizer`. Each warning is also a `warning: ...` text line. |
 | `meeting_stop` | `id?` | the `meet stop --detach --format json` object (`status: "transcribing"`). The tool always takes the detached path: poll `meeting_status` with the id until `stopped` (or `failed`). |
 | `meeting_get_transcript` | `id?`, `format` (`md` \| `json`, required) | `TranscriptResult` (below) |
@@ -299,12 +299,13 @@ match, so a new error cannot ship without a code. Codes an agent will see:
 | `meeting_not_stopped` | `meeting_get_transcript` on a session that is still recording |
 | `meeting_still_transcribing` | `meeting_get_transcript` while finalize runs |
 | `meeting_finalize_failed` | `meeting_get_transcript` on a `failed` session; the message includes the recorded error and `comlink meet finalize <id>` |
-| `meeting_export_unavailable` | the session is stopped but its JSON export is missing or invalid |
-| `meeting_session_unreadable` | a `session.json` exists but cannot be parsed |
-| `meeting_lifecycle_busy` | another comlink process holds the session lock |
+| `meeting_export_unavailable` | the session is stopped but its JSON export is missing or invalid, or an export path in `session.json` resolves outside the session directory |
+| `meeting_session_unreadable` | a `session.json` exists but cannot be read or parsed; or (transcript reads) it names a different session, or the session directory is a symlink |
+| `meeting_lifecycle_busy` | another comlink process holds the session lock, or another meeting start did not finish within 10 s |
 | `meeting_finalize_launch_failed` | the detached finalizer could not be started (the session is `failed`) |
 | `mode_not_found`, `model_missing`, `model_path_missing`, `dependency_missing`, `dependency_path_missing`, `dependency_not_executable`, `audio_capture_failed`, `invalid_config_value` | `meeting_start` setup failures, same as `meet start` |
-| `internal_panic` | the service call panicked; the server keeps running |
+| `internal_panic` | the service call panicked (the message carries the panic text); the server keeps running |
+| `internal_cancelled` | the service call was cancelled before it finished (e.g. the server shutting down) |
 
 Other codes (`io`, `json`, `storage`, `config_parse`, `whisper_failed`,
 `meeting_chunk_cleanup_failed`, `meeting_export_invalid`, ...) follow the same

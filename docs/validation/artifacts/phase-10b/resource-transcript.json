@@ -1,10 +1,10 @@
 {
   "artifacts": {
     "chunks_dir": null,
-    "json_export": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/transcript.json",
-    "markdown_export": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/transcript.md",
-    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0/segments.jsonl",
-    "session_dir": "<tmp>/comlink-data/meetings/s1790233071990312000-80424-0"
+    "json_export": "<tmp>/comlink-data/meetings/s1790234838429632000-69003-0/transcript.json",
+    "markdown_export": "<tmp>/comlink-data/meetings/s1790234838429632000-69003-0/transcript.md",
+    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790234838429632000-69003-0/segments.jsonl",
+    "session_dir": "<tmp>/comlink-data/meetings/s1790234838429632000-69003-0"
   },
   "final_text": "Phase 10b fixture segment 00000. Phase 10b fixture segment 00001.",
   "processing_steps": [
@@ -57,7 +57,7 @@
     "model": "<tmp>/mock-model.bin",
     "sample_rate_hz": 16000,
     "segment_count": 2,
-    "session_id": "s1790233071990312000-80424-0",
+    "session_id": "s1790234838429632000-69003-0",
     "source": "user_mic device :0",
     "source_mode": "mic-only",
     "source_streams": [
@@ -66,9 +66,9 @@
         "label": "user_mic"
       }
     ],
-    "started_at_ms": 1790233071990,
+    "started_at_ms": 1790234838429,
     "status": "stopped",
-    "stopped_at_ms": 1790233072645
+    "stopped_at_ms": 1790234839074
   },
   "source": {
     "mode": "mic-only",

@@ -44,7 +44,7 @@ Phase 10b adds `comlink mcp`, a local stdio MCP server that lets agents such as 
   - `-32002` for an unknown session
   - `-32600` when the session is not readable yet
   - `-32603` for anything else
-- **Schema violations in tool arguments** (for example `source: "radio"`) are rejected by rmcp before the service runs. They come back as `isError: true` with a `failed to deserialize parameters ...` text block and no `structuredContent`. rmcp does this, not comlink.
+- **Schema violations in tool arguments** (for example `source: "radio"`) are rejected by rmcp before the service runs. They come back as `isError: true` with an rmcp text block naming the bad value and no `structuredContent`. rmcp does this, not comlink.
 - **`meeting_get_transcript` needs a valid JSON export even for `md`,** because its warnings and audio level come from the JSON export. A session with only a Markdown file returns `meeting_export_unavailable`.
 - **`retention.transcripts=false` is a success.** The result has `transcript_retained: false` and the export's null text.
 - **Ids that could escape the store** (`/`, `..`, empty) are reported as `meeting_session_not_found` before they reach the store.
@@ -128,6 +128,61 @@ Results (LF-162 worktree, macOS, rustc 1.96.1):
   - `config set` / `privacy audit` / `config show` MCP output.
 - `tests/meet_service_stdout.rs` also runs `prepare_start`, `transcript`, `mcp_privacy` and a full in-process MCP tool cycle, and still asserts 0 bytes on stdout and stderr.
 
+## Fix Round (review round 2)
+
+The first cross-review's Codex pass (95 s, no findings) was treated as no
+adversary. This round fixed the Claude reviewers' mediums, ran a real Codex
+review of the whole branch diff with a checklist, fixed everything it
+confirmed, and ran a confirming Codex re-review of the fix commits.
+
+Claude review mediums:
+- `transcript()` for a `failed` session carries the recorded error, or points
+  at `finalize.log` when none was recorded; it never says "unknown error".
+- A corrupt `session.json` read by `transcript()` is
+  `meeting_session_unreadable` naming the session and file.
+- New MCP tests: `system-only` and `mic-plus-system` full cycles, start
+  without a `device` (the result names the microphone for every selection:
+  `input_device` + a text line), and a failing / panicking context factory
+  mid-session (tools `isError` with `config_parse` / `internal_panic`,
+  resources `-32603` with `data.error_code`, the server keeps serving).
+
+Codex adversary (checklist: stdout purity, child stdio, transcript in logs
+were checked clean with file:line evidence), fixed:
+- **high — concurrent starts:** two `meeting_start` calls (rmcp dispatches
+  concurrently) could both record. Starts are now serialized by
+  `<meetings>/start.lock`, held from the active-session check through
+  recorder startup and the active-pointer write.
+- **medium — config race:** every persistent config read-modify-write now
+  runs under `config.json.lock` (`config::update_persistent`), so a
+  concurrent `vocab add` cannot restore `mcp.allow_start=true` after a
+  successful `config set mcp.allow_start false`.
+- **medium — transcript confinement:** transcript reads (tools and
+  resources) require `session.json` to name the requested id, reject a
+  symlinked session directory, and reject export paths resolving outside it.
+- **medium — group stop:** recorder stop signals the recorder's process
+  group (falling back to the pid for pre-10b sessions) and waits until the
+  group is empty, so a wrapper's descendants stop too.
+- low: reaper-thread spawn failures are reported (recorder: stderr;
+  finalizer: `finalize.log`).
+
+Lows also fixed: `JoinError` split into `internal_panic` (with panic text)
+and `internal_cancelled`; doctor shows why the binary path is unknown;
+`config set` flags an invalid `COMLINK_MCP_ALLOW_START` rather than saying it
+wins; the E2E fails when artifact redaction or the `lsof` probe fails;
+atomic config writes (symlinked `config.json`) documented; a brittle
+serde-wording assertion loosened.
+
+Every fix has a regression test that fails with the fix reverted (checked
+by reverting each fix locally): the concurrent-start test failed 3/3 without
+the lock; the config race test reported "a stale snapshot re-enabled start";
+the group test left the descendant in state `S`.
+
+Gate after the round: `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings`, `cargo test --all` three times (249 passed, 0 failed each run),
+`cargo run -- doctor` (exit 0), `cargo run -- privacy audit --format json`,
+`scripts/e2e/phase-10b-mcp.sh` and `scripts/e2e/phase-10a-meet-service.sh`
+all passed.
+
 ## Known Gaps
 
 - `transcribe_file` is not exposed (optional in the issue; deferred).
@@ -137,6 +192,12 @@ Results (LF-162 worktree, macOS, rustc 1.96.1):
 - `meeting_start` cannot set the chunk length.
 - The TCC permission prompt and the Claude Desktop flow cannot be automated here. They are covered by the manual gate.
 - The `lsof` socket check is macOS/BSD-specific, and the E2E requires `lsof`.
+- Protocol `2024-11-05` is not accepted (older MCP Inspector / Desktop builds are offered `2025-11-25`).
+- With no sessions at all, `meeting_get_transcript` returns `meeting_no_active_session` ("no active meeting session"), which is worded for recording.
+- `meet export` (CLI) keeps trusting the export paths in `session.json`; only the MCP transcript reads are confined to the session directory.
+- A recorder whose group leader has already exited while descendants remain is not signalled (the leader identity can no longer be verified).
+- Concurrent `meeting_start` is tested at the service level (the MCP handlers call the same `start`), not with two in-flight MCP requests.
+- `resources/read` on a still-recording session (`-32600`) has no dedicated test.
 
 ## Manual Test Instructions (pause gate)
 
