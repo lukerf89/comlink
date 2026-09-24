@@ -392,7 +392,7 @@ async fn bad_tool_arguments_never_reach_the_service_and_unsafe_ids_are_not_found
         (
             "meeting_start",
             json!({"source": "radio", "mode": "raw"}),
-            "unknown variant `radio`",
+            "`radio`",
         ),
         ("meeting_start", json!({"source": "mic-only"}), "mode"),
         ("meeting_get_transcript", json!({"format": "pdf"}), "`pdf`"),
@@ -401,7 +401,8 @@ async fn bad_tool_arguments_never_reach_the_service_and_unsafe_ids_are_not_found
         assert_eq!(result["isError"], true, "{result}");
         assert!(result.get("structuredContent").is_none(), "{result}");
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("failed to deserialize parameters"), "{text}");
+        // Only the offending value is pinned: the surrounding wording is
+        // rmcp/serde's and may change between releases.
         assert!(text.contains(needle), "{text}");
     }
     assert!(harness.store().list_sessions().unwrap().0.is_empty());

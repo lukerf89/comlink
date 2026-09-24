@@ -342,6 +342,9 @@ pub struct PreparedStart {
     pub request: StartRequest,
     pub runtime: RuntimeDeps,
     pub device_note: Option<DeviceNote>,
+    /// The microphone the recorder will open and how it was selected, so a
+    /// caller that is not a terminal (the MCP server) can always report it.
+    pub input_device: record::ResolvedRecordDevice,
 }
 
 impl PreparedStart {
@@ -398,7 +401,7 @@ pub fn prepare_start(
     Ok(PreparedStart {
         request: StartRequest {
             mode,
-            device: device.avfoundation_input,
+            device: device.avfoundation_input.clone(),
             source,
             system_device,
             chunk_seconds,
@@ -406,6 +409,7 @@ pub fn prepare_start(
         },
         runtime,
         device_note,
+        input_device: device,
     })
 }
 
@@ -1450,28 +1454,20 @@ pub fn transcript(
     let store = ctx.store();
     let id = match resolve_export_session_id(&store, id) {
         Ok(id) => id,
-        Err(ComlinkError::MeetingFinalizeFailed(id)) => {
-            let error = store
-                .read_session(&id)
-                .ok()
-                .and_then(|session| session.error)
-                .unwrap_or_else(|| "unknown error".to_string());
-            return Err(ComlinkError::MeetingFinalizeFailedDetail { id, error });
-        }
+        // The newest session failed: fall through so its recorded error (or
+        // why it cannot be read) is reported below, never a bare "unknown".
+        Err(ComlinkError::MeetingFinalizeFailed(id)) => id,
         Err(error) => return Err(error),
     };
-    let session = store.read_session(&id)?;
+    // A corrupt or unreadable `session.json` names the session and file
+    // rather than surfacing as a bare `json`/`io` error.
+    let session = read_session_for_status(&store, &id)?;
     match session.status {
         MeetingStatus::Recording => return Err(ComlinkError::MeetingNotStopped(id)),
         MeetingStatus::Transcribing => return Err(ComlinkError::MeetingStillTranscribing(id)),
         MeetingStatus::Failed => {
-            return Err(ComlinkError::MeetingFinalizeFailedDetail {
-                id,
-                error: session
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "unknown error".to_string()),
-            })
+            let error = failed_session_error(&session);
+            return Err(ComlinkError::MeetingFinalizeFailedDetail { id, error });
         }
         MeetingStatus::Stopped => {}
     }
@@ -1502,6 +1498,19 @@ pub fn transcript(
         warnings: export.warnings,
         audio_level: export.audio_level,
     })
+}
+
+/// The recorded finalize error of a `failed` session. A failed session with
+/// no recorded error points at its `finalize.log` instead of reporting an
+/// unexplained failure.
+fn failed_session_error(session: &MeetingSessionState) -> String {
+    match session.error.as_deref().map(str::trim) {
+        Some(error) if !error.is_empty() => error.to_string(),
+        _ => format!(
+            "no error was recorded in session.json; see {}",
+            finalize_log_path(session).display()
+        ),
+    }
 }
 
 /// Every session in any status, newest first; unreadable session dirs are

@@ -72,6 +72,16 @@ impl ServiceHarness {
             &format!(
                 r#"#!/usr/bin/env bash
 set -euo pipefail
+case " $* " in
+  *" -list_devices true "*)
+    {{
+      echo "[AVFoundation indev @ 0x1] AVFoundation audio devices:"
+      echo "[AVFoundation indev @ 0x1] [0] MacBook Pro Microphone"
+      echo "[AVFoundation indev @ 0x1] [1] BlackHole 2ch"
+    }} >&2
+    exit 1
+    ;;
+esac
 out="${{@: -1}}"
 chunks={chunks}
 mkdir -p "$(dirname "$out")"

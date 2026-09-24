@@ -276,6 +276,9 @@ pub struct ConfigSetOutcome {
     /// Set when `COMLINK_MCP_ALLOW_START` is present and disagrees with the
     /// saved value, so the caller can warn that the env var wins.
     pub env_override: Option<String>,
+    /// False when that env value is not a boolean: it does not win, it makes
+    /// every config load fail until it is fixed or unset.
+    pub env_override_valid: bool,
 }
 
 /// Parse a `config set` boolean. Same spellings as the boolean env vars.
@@ -305,11 +308,15 @@ pub fn set_key(key: &str, value: &str) -> Result<ConfigSetOutcome, ComlinkError>
     let env_override = env::var(MCP_ALLOW_START_ENV)
         .ok()
         .filter(|raw| parse_bool_value(MCP_ALLOW_START_ENV, raw).ok() != Some(value));
+    let env_override_valid = env_override
+        .as_deref()
+        .is_none_or(|raw| parse_bool_value(MCP_ALLOW_START_ENV, raw).is_ok());
     Ok(ConfigSetOutcome {
         key: MCP_ALLOW_START_KEY,
         value,
         config_file: resolved.paths.config_file,
         env_override,
+        env_override_valid,
     })
 }
 
@@ -1031,6 +1038,20 @@ mod tests {
                 error,
                 ComlinkError::InvalidConfigValue { name, .. } if name == MCP_ALLOW_START_ENV
             ));
+        });
+    }
+
+    #[test]
+    fn config_set_flags_an_invalid_env_override_instead_of_saying_it_wins() {
+        with_isolated_home(Some("sometimes"), |_| {
+            let outcome = set_key("mcp.allow_start", "true").unwrap();
+            assert_eq!(outcome.env_override.as_deref(), Some("sometimes"));
+            assert!(!outcome.env_override_valid);
+        });
+        with_isolated_home(Some("false"), |_| {
+            let outcome = set_key("mcp.allow_start", "true").unwrap();
+            assert_eq!(outcome.env_override.as_deref(), Some("false"));
+            assert!(outcome.env_override_valid);
         });
     }
 

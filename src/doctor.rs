@@ -187,7 +187,10 @@ fn build_report_with(
         options,
         probe,
     ));
-    checks.extend(mcp_checks(resolved, env::current_exe().ok()));
+    checks.extend(mcp_checks(
+        resolved,
+        env::current_exe().map_err(|error| error.to_string()),
+    ));
 
     let ok = report_ok(&checks);
 
@@ -518,7 +521,13 @@ const MCP_TCC_NOTE: &str = "macOS microphone permission (TCC) belongs to the app
 /// MCP section: the server binary and the `mcp.allow_start` opt-in. Both are
 /// informational (`required: false`, never `missing`/`bad`), so doctor stays
 /// green on a headless box.
-fn mcp_checks(resolved: &ResolvedConfig, exe: Option<PathBuf>) -> Vec<DoctorCheck> {
+fn mcp_checks(resolved: &ResolvedConfig, exe: Result<PathBuf, String>) -> Vec<DoctorCheck> {
+    let exe_error = exe
+        .as_ref()
+        .err()
+        .map(|error| format!(" The comlink binary path could not be determined ({error}); substitute it in the registration command."))
+        .unwrap_or_default();
+    let exe = exe.ok();
     let exe_display = exe
         .as_ref()
         .map(|path| path.display().to_string())
@@ -529,7 +538,7 @@ fn mcp_checks(resolved: &ResolvedConfig, exe: Option<PathBuf>) -> Vec<DoctorChec
         required: false,
         path: exe.as_ref().map(|path| path.display().to_string()),
         detail: format!(
-            "Local stdio MCP server: the MCP client launches `comlink mcp` as a subprocess; transport=stdio, no network listener. {MCP_TCC_NOTE}"
+            "Local stdio MCP server: the MCP client launches `comlink mcp` as a subprocess; transport=stdio, no network listener. {MCP_TCC_NOTE}{exe_error}"
         ),
         remediation: format!(
             "register with `claude mcp add comlink -- {exe_display} mcp` (see docs/local-dev.md for Claude Desktop); check mic permission with `comlink doctor --probe-mic`"
@@ -771,7 +780,10 @@ mod tests {
     #[test]
     fn mcp_checks_are_informational_and_never_fail_the_report() {
         for allow_start in [false, true] {
-            for exe in [None, Some(PathBuf::from("/opt/comlink/bin/comlink"))] {
+            for exe in [
+                Err("permission denied".to_string()),
+                Ok(PathBuf::from("/opt/comlink/bin/comlink")),
+            ] {
                 let checks = mcp_checks(&resolved_with_allow_start(allow_start), exe.clone());
                 assert_eq!(checks.len(), 2);
                 for check in &checks {
@@ -784,9 +796,20 @@ mod tests {
                 assert!(server.detail.contains("--probe-mic"));
                 assert!(server.detail.contains("Claude.app"));
                 assert!(server.remediation.contains("claude mcp add comlink --"));
-                if let Some(exe) = &exe {
-                    assert_eq!(server.path.as_deref(), exe.to_str());
-                    assert!(server.remediation.contains("/opt/comlink/bin/comlink mcp"));
+                match &exe {
+                    Ok(exe) => {
+                        assert_eq!(server.path.as_deref(), exe.to_str());
+                        assert!(server.remediation.contains("/opt/comlink/bin/comlink mcp"));
+                        assert!(!server.detail.contains("could not be determined"));
+                    }
+                    // The reason the path is a placeholder is shown.
+                    Err(_) => assert!(
+                        server
+                            .detail
+                            .contains("binary path could not be determined (permission denied)"),
+                        "{}",
+                        server.detail
+                    ),
                 }
                 let start = &checks[1];
                 assert_eq!(start.name, "mcp-allow-start");

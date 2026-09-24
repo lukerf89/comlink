@@ -5,12 +5,22 @@
 
 mod common;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU8, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
-use comlink::meet_service;
+use comlink::{
+    error::ComlinkError,
+    mcp::McpContextFactory,
+    meet_service::{self, MeetContext},
+};
 use common::{
     tool_err, tool_ok, CountingLauncher, FailingLauncher, McpClient, MockOptions, NoopLauncher,
-    ServiceHarness,
+    ServiceHarness, TestContextFactory,
 };
 use serde_json::{json, Value};
 
@@ -379,4 +389,205 @@ async fn retention_off_transcript_succeeds_with_transcript_retained_false() {
             .as_str()
             .unwrap()
             .contains("retention.transcripts is off")));
+}
+
+#[tokio::test]
+async fn system_only_and_mic_plus_system_sources_run_the_full_cycle() {
+    for (source, labels, has_mic) in [
+        ("system-only", vec!["system_audio"], false),
+        ("mic-plus-system", vec!["user_mic", "system_audio"], true),
+    ] {
+        let harness = ServiceHarness::new(MockOptions::default());
+        let launcher = harness.thread_launcher();
+        let (mut client, _) =
+            McpClient::initialized(harness.mcp_factory(launcher.clone(), true), PROTOCOL).await;
+
+        let started = client
+            .call_tool(
+                "meeting_start",
+                json!({
+                    "source": source,
+                    "mode": "raw",
+                    "device": ":0",
+                    "system_device": "BlackHole 2ch",
+                    "no_llm": true
+                }),
+            )
+            .await;
+        let start = tool_ok(&started);
+        assert_eq!(start["source"]["mode"], source, "{start:#}");
+        let recorders = start["recorders"].as_array().unwrap();
+        let recorder_labels: Vec<&str> = recorders
+            .iter()
+            .map(|recorder| recorder["source_label"].as_str().unwrap())
+            .collect();
+        assert_eq!(recorder_labels, labels, "{source}");
+        // The system stream records the requested BlackHole input.
+        let system_stream = start["source"]["streams"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stream| stream["label"] == "system_audio")
+            .unwrap_or_else(|| panic!("{source}: no system_audio stream in {start:#}"));
+        assert_eq!(system_stream["device"], ":1", "{source}");
+        // System-only capture opens no microphone, so none is reported.
+        assert_eq!(start["input_device"].is_null(), !has_mic, "{source}");
+        if has_mic {
+            assert_eq!(start["input_device"]["avfoundation_input"], ":0");
+            assert_eq!(start["input_device"]["selected_by"], "--device");
+        }
+        for recorder in recorders {
+            common::wait_for_chunks(
+                std::path::Path::new(recorder["chunks_dir"].as_str().unwrap()),
+                2,
+            );
+        }
+        let id = start["session_id"].as_str().unwrap().to_string();
+
+        let stop = tool_ok(&client.call_tool("meeting_stop", json!({})).await);
+        assert_eq!(stop["status"], "transcribing");
+        poll_status(&mut client, &id, "stopped").await;
+        for result in launcher.join_all() {
+            result.unwrap();
+        }
+        let transcript = tool_ok(
+            &client
+                .call_tool("meeting_get_transcript", json!({"format": "json"}))
+                .await,
+        );
+        assert_eq!(transcript["content"]["source"]["mode"], source);
+        common::assert_json_rpc_lines(client.server_lines.iter().map(String::as_str));
+    }
+}
+
+#[tokio::test]
+async fn start_without_a_device_reports_which_microphone_is_recorded() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let (mut client, _) =
+        McpClient::initialized(harness.mcp_factory(Arc::new(NoopLauncher), true), PROTOCOL).await;
+    let started = client
+        .call_tool(
+            "meeting_start",
+            json!({"source": "mic-only", "mode": "raw", "no_llm": true}),
+        )
+        .await;
+    let start = tool_ok(&started);
+    let device = &start["input_device"];
+    let input = device["avfoundation_input"].as_str().unwrap();
+    // The recorder opens the device the agent is told about.
+    assert_eq!(start["source"]["streams"][0]["device"], input);
+    // Which default applies depends on the host (CoreAudio default input via
+    // system_profiler, else the `:0` fallback) or an inherited
+    // COMLINK_RECORD_DEVICE; each must be reported.
+    let selected_by = device["selected_by"].as_str().unwrap();
+    let expected_line = match selected_by {
+        "system default input" => {
+            let name = device["name"].as_str().unwrap();
+            format!("Using system default input device: {name} ({input})")
+        }
+        "fallback" => format!("Using fallback input device {input}"),
+        "COMLINK_RECORD_DEVICE" => "from COMLINK_RECORD_DEVICE".to_string(),
+        other => panic!("unexpected selection {other}: {device}"),
+    };
+    // Second text block, right after the consent reminder.
+    let line = started["content"][1]["text"].as_str().unwrap();
+    assert!(
+        line.contains(&expected_line),
+        "{line:?} vs {expected_line:?}"
+    );
+    assert!(line.contains(input), "{line}");
+    let id = start["session_id"].as_str().unwrap().to_string();
+    common::wait_for_chunks(
+        std::path::Path::new(start["chunks_dir"].as_str().unwrap()),
+        2,
+    );
+    meet_service::stop(
+        &harness.ctx(Arc::new(NoopLauncher)),
+        Some(id),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+}
+
+/// Wraps the harness factory so a test can make the next context builds fail
+/// (as `config::load` does for a malformed config.json) or panic.
+struct FlakyFactory {
+    inner: Arc<TestContextFactory>,
+    mode: AtomicU8,
+}
+
+const FACTORY_OK: u8 = 0;
+const FACTORY_CONFIG_ERROR: u8 = 1;
+const FACTORY_PANIC: u8 = 2;
+
+impl McpContextFactory for FlakyFactory {
+    fn context(&self) -> Result<MeetContext, ComlinkError> {
+        match self.mode.load(Ordering::SeqCst) {
+            FACTORY_CONFIG_ERROR => Err(ComlinkError::ConfigParse {
+                path: "/tmp/comlink-home/config.json".into(),
+                source: serde_json::from_str::<Value>("{ bad").unwrap_err(),
+            }),
+            FACTORY_PANIC => panic!("factory exploded on purpose"),
+            _ => self.inner.context(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_failing_or_panicking_context_is_a_tool_error_and_the_server_keeps_serving() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let factory = Arc::new(FlakyFactory {
+        inner: harness.mcp_factory(Arc::new(NoopLauncher), true),
+        mode: AtomicU8::new(FACTORY_OK),
+    });
+    let (mut client, _) = McpClient::initialized(factory.clone(), PROTOCOL).await;
+    tool_ok(&client.call_tool("meeting_status", json!({})).await);
+
+    // A malformed config mid-session: every tool is isError config_parse.
+    factory.mode.store(FACTORY_CONFIG_ERROR, Ordering::SeqCst);
+    for (tool, arguments) in [
+        ("meeting_start", start_args()),
+        ("meeting_status", json!({})),
+        ("meeting_stop", json!({})),
+        ("meeting_get_transcript", json!({"format": "md"})),
+        ("meeting_list", json!({})),
+    ] {
+        let message = tool_err(&client.call_tool(tool, arguments).await, "config_parse");
+        assert!(message.contains("config.json"), "{tool}: {message}");
+    }
+    // Resources cannot carry isError: JSON-RPC internal error with the code.
+    for (method, params) in [
+        ("resources/list", json!({})),
+        (
+            "resources/read",
+            json!({"uri": "comlink://meetings/m1/transcript.md"}),
+        ),
+    ] {
+        let response = client.request(method, params).await;
+        assert_eq!(response["error"]["code"], -32603, "{method}: {response:#}");
+        assert_eq!(response["error"]["data"]["error_code"], "config_parse");
+    }
+
+    // A panic inside a service call is internal_panic with the panic text.
+    factory.mode.store(FACTORY_PANIC, Ordering::SeqCst);
+    let message = tool_err(
+        &client.call_tool("meeting_status", json!({})).await,
+        comlink::mcp::INTERNAL_PANIC_CODE,
+    );
+    assert!(message.contains("factory exploded on purpose"), "{message}");
+    let response = client.request("resources/list", json!({})).await;
+    assert_eq!(
+        response["error"]["data"]["error_code"],
+        comlink::mcp::INTERNAL_PANIC_CODE
+    );
+
+    // Fixed config: the same server answers normally again.
+    factory.mode.store(FACTORY_OK, Ordering::SeqCst);
+    assert_eq!(
+        tool_ok(&client.call_tool("meeting_status", json!({})).await)["status"],
+        "none"
+    );
+    let list = client.request("resources/list", json!({})).await;
+    assert_eq!(list["result"]["resources"], json!([]));
+    common::assert_json_rpc_lines(client.server_lines.iter().map(String::as_str));
 }

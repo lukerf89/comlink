@@ -696,11 +696,16 @@ fn run_config(command: ConfigCommand) -> Result<(), ComlinkError> {
                 outcome.value,
                 outcome.config_file.display()
             );
-            if let Some(env_value) = outcome.env_override {
-                eprintln!(
+            match outcome.env_override {
+                Some(env_value) if outcome.env_override_valid => eprintln!(
                     "note: {}={env_value} is set in the environment and takes precedence over the config file",
                     config::MCP_ALLOW_START_ENV
-                );
+                ),
+                Some(env_value) => eprintln!(
+                    "warning: {}={env_value} is set in the environment but is not a boolean; every comlink command (and the MCP server) will fail to load config until it is fixed or unset",
+                    config::MCP_ALLOW_START_ENV
+                ),
+                None => {}
             }
             Ok(())
         }

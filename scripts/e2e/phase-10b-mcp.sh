@@ -23,17 +23,39 @@ artifact_dir="$repo_root/docs/validation/artifacts/phase-10b"
 tmp_dir="$(mktemp -d)"
 
 cleanup() {
-  python3 - "$tmp_dir" "$repo_root" "$artifact_dir" <<'PY' || true
+  local status=$?
+  # Redaction failure must fail the run: otherwise committed artifacts keep
+  # absolute home/temp/repo paths and nothing reports it.
+  if ! python3 - "$tmp_dir" "$repo_root" "$artifact_dir" <<'PY'
+import os
 import pathlib
 import sys
 
 tmp_dir, repo_root, artifact_dir = sys.argv[1], sys.argv[2], pathlib.Path(sys.argv[3])
+# Longest first, and both the given and the symlink-resolved spelling
+# (macOS: /var -> /private/var, /tmp -> /private/tmp).
+replacements = sorted(
+    {
+        (os.path.realpath(tmp_dir), "<tmp>"),
+        (tmp_dir, "<tmp>"),
+        (os.path.realpath(repo_root), "<repo>"),
+        (repo_root, "<repo>"),
+    },
+    key=lambda pair: -len(pair[0]),
+)
 for path in artifact_dir.glob("*"):
     if path.is_file():
         text = path.read_text(errors="ignore")
-        path.write_text(text.replace(tmp_dir, "<tmp>").replace(repo_root, "<repo>"))
+        for old, new in replacements:
+            text = text.replace(old, new)
+        path.write_text(text)
 PY
+  then
+    echo "phase-10b E2E failed: could not redact paths in $artifact_dir" >&2
+    status=1
+  fi
   rm -rf "$tmp_dir"
+  exit "$status"
 }
 trap cleanup EXIT
 
@@ -246,6 +268,10 @@ lsof = subprocess.run(
 artifact("lsof-network.txt", lsof.stdout + lsof.stderr)
 if lsof.stdout.strip():
     fail(f"comlink mcp has network sockets open:\n{lsof.stdout}")
+# lsof exits 1 with no output when nothing matches; anything else (or any
+# stderr) means the probe itself failed and proves nothing.
+if lsof.returncode not in (0, 1) or lsof.stderr.strip():
+    fail(f"lsof network probe failed (exit {lsof.returncode}): {lsof.stderr}")
 
 tools = request("tools/list", {})
 names = sorted(tool["name"] for tool in tools["result"]["tools"])

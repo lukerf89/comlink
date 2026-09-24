@@ -1887,6 +1887,46 @@ fn transcript_errors_for_none_unknown_and_missing_or_invalid_json_export() {
 }
 
 #[test]
+fn transcript_names_a_corrupt_session_and_never_reports_an_unknown_failure() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+
+    // A failed session with no recorded error points at its finalize.log,
+    // both for the implicit (newest) read and by id.
+    let failed = failed_meeting(&harness);
+    let store = harness.store();
+    let mut session = store.read_session(&failed).unwrap();
+    session.error = None;
+    store.save_session(&session).unwrap();
+    for id in [None, Some(failed.clone())] {
+        let error = meet_service::transcript(&ctx, id, md()).unwrap_err();
+        match &error {
+            ComlinkError::MeetingFinalizeFailedDetail { id, error: detail } => {
+                assert_eq!(id, &failed);
+                assert!(!detail.contains("unknown error"), "{detail}");
+                assert!(detail.contains("finalize.log"), "{detail}");
+            }
+            other => panic!("expected the detailed finalize failure, got {other:?}"),
+        }
+    }
+
+    // A corrupt session.json is reported against that session and file,
+    // not as a bare `json` error.
+    let stopped = stopped_meeting(&harness);
+    let session_json = store.root().join(&stopped).join("session.json");
+    fs::write(&session_json, b"{ truncated").unwrap();
+    let error = meet_service::transcript(&ctx, Some(stopped.clone()), md()).unwrap_err();
+    match &error {
+        ComlinkError::MeetingSessionUnreadable { id, path, .. } => {
+            assert_eq!(id, &stopped);
+            assert_eq!(path, &session_json);
+        }
+        other => panic!("expected MeetingSessionUnreadable, got {other:?}"),
+    }
+    assert_eq!(error.error_code(), "meeting_session_unreadable");
+}
+
+#[test]
 fn transcript_with_retention_off_is_not_an_error() {
     let harness = ServiceHarness::new(MockOptions::default());
     let mut ctx = harness.ctx(Arc::new(NoopLauncher));

@@ -531,11 +531,16 @@ pub fn start_segmented_capture(
     // never accumulates zombie recorders. The thread only waits: stopping is
     // still done by signal through the recorded identity, and if this process
     // exits first the recorder is reparented and keeps running.
-    let _ = thread::Builder::new()
+    if let Err(error) = thread::Builder::new()
         .name("comlink-recorder-reaper".to_string())
         .spawn(move || {
             let _ = child.wait();
-        });
+        })
+    {
+        // Not fatal: the recorder runs either way, but it will linger as a
+        // zombie after it exits until this process does.
+        eprintln!("comlink: could not start the recorder reaper thread: {error}");
+    }
     Ok(SegmentedCapture { pid, identity })
 }
 

@@ -32,6 +32,7 @@ use crate::{
     error::ComlinkError,
     meet,
     meet_service::{self, MeetContext},
+    record::{DeviceSource, ResolvedRecordDevice},
 };
 
 /// MCP protocol revisions this server has been checked against (the
@@ -47,6 +48,9 @@ pub const LATEST_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2025_11_
 
 /// `structuredContent.error_code` for a tool whose service call panicked.
 pub const INTERNAL_PANIC_CODE: &str = "internal_panic";
+/// `structuredContent.error_code` for a service call that was cancelled
+/// before it finished (e.g. the runtime shutting down).
+pub const INTERNAL_CANCELLED_CODE: &str = "internal_cancelled";
 /// `data.error_code` for a resource URI that is not one of the templates.
 pub const INVALID_RESOURCE_URI_CODE: &str = "invalid_resource_uri";
 
@@ -88,7 +92,7 @@ impl McpContextFactory for ProductionContextFactory {
 // ---------------------------------------------------------------------------
 
 /// Meeting capture source.
-#[derive(Debug, Clone, Copy, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, JsonSchema)]
 #[schemars(crate = "rmcp::schemars")]
 #[serde(rename_all = "kebab-case")]
 pub enum MeetingSourceArg {
@@ -101,7 +105,7 @@ pub enum MeetingSourceArg {
 }
 
 impl MeetingSourceArg {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::MicOnly => "mic-only",
             Self::SystemOnly => "system-only",
@@ -198,7 +202,10 @@ impl ComlinkMcp {
         match tokio::task::spawn_blocking(move || call(factory.context()?)).await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => Err(CallFailure::Service(error)),
-            Err(join_error) => Err(CallFailure::Panic(join_error.to_string())),
+            Err(join_error) if join_error.is_panic() => {
+                Err(CallFailure::Panic(panic_detail(join_error.into_panic())))
+            }
+            Err(join_error) => Err(CallFailure::Cancelled(join_error.to_string())),
         }
     }
 }
@@ -208,6 +215,16 @@ impl ComlinkMcp {
 enum CallFailure {
     Service(ComlinkError),
     Panic(String),
+    Cancelled(String),
+}
+
+/// The text of a panic payload (`panic!` with a literal or a format string).
+fn panic_detail(payload: Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|text| (*text).to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "non-string panic payload".to_string())
 }
 
 impl CallFailure {
@@ -215,6 +232,7 @@ impl CallFailure {
         match self {
             Self::Service(error) => error.error_code(),
             Self::Panic(_) => INTERNAL_PANIC_CODE,
+            Self::Cancelled(_) => INTERNAL_CANCELLED_CODE,
         }
     }
 
@@ -222,6 +240,7 @@ impl CallFailure {
         match self {
             Self::Service(error) => error.to_string(),
             Self::Panic(detail) => format!("comlink service call panicked: {detail}"),
+            Self::Cancelled(detail) => format!("comlink service call was cancelled: {detail}"),
         }
     }
 
@@ -277,6 +296,36 @@ fn tool_success<T: Serialize>(value: &T, lead: Vec<String>) -> CallToolResult {
     }
 }
 
+/// The microphone a `meeting_start` opened, as structured data for the agent.
+fn input_device_json(device: &ResolvedRecordDevice) -> Value {
+    json!({
+        "avfoundation_input": device.avfoundation_input,
+        "name": device.name,
+        "selected_by": device.source.as_str(),
+    })
+}
+
+/// One line telling the agent which microphone is being recorded. The
+/// system-default case is the exact line `meet start` prints to stderr.
+fn input_device_line(device: &ResolvedRecordDevice) -> String {
+    let named = match &device.name {
+        Some(name) => format!("{name} ({})", device.avfoundation_input),
+        None => device.avfoundation_input.clone(),
+    };
+    match device.source {
+        DeviceSource::SystemDefault => meet_service::DeviceNote {
+            name: device.name.clone(),
+            avfoundation_input: device.avfoundation_input.clone(),
+        }
+        .to_string(),
+        DeviceSource::Fallback => format!(
+            "Using fallback input device {named}: no system default input was found. If the capture is near-silent, pass `device`."
+        ),
+        DeviceSource::Flag => format!("Using input device {named} (from the `device` argument)"),
+        DeviceSource::Env => format!("Using input device {named} (from COMLINK_RECORD_DEVICE)"),
+    }
+}
+
 fn warning_lines(warnings: &[String]) -> Vec<String> {
     warnings
         .iter()
@@ -324,6 +373,7 @@ impl ComlinkMcp {
         &self,
         Parameters(params): Parameters<MeetingStartParams>,
     ) -> Result<CallToolResult, McpError> {
+        let request_source = params.source;
         let outcome = self
             .blocking(move |base| {
                 if !base.resolved.config.mcp.allow_start {
@@ -341,22 +391,34 @@ impl ComlinkMcp {
                         no_llm: params.no_llm.unwrap_or(false),
                     },
                 )?;
-                let (ctx, request, note) = prepared.into_context(base.resolved.clone());
+                // System-only capture opens no microphone.
+                let mic = (request_source != MeetingSourceArg::SystemOnly)
+                    .then(|| prepared.input_device.clone());
+                let (ctx, request, _note) = prepared.into_context(base.resolved.clone());
                 let ctx = ctx.with_launcher(base.launcher.clone());
-                Ok((meet_service::start(&ctx, request)?, note))
+                Ok((meet_service::start(&ctx, request)?, mic))
             })
             .await;
         Ok(match outcome {
-            Ok((status, note)) => {
+            Ok((status, mic)) => {
                 let mut lead = vec![status.consent_reminder.to_string()];
-                if let Some(note) = note {
-                    lead.push(note.to_string());
+                if let Some(mic) = &mic {
+                    lead.push(input_device_line(mic));
                 }
                 lead.push(format!(
                     "Recording meeting {}. Call meeting_stop to stop, then poll meeting_status until `stopped`.",
                     status.session_id
                 ));
-                tool_success(&status, lead)
+                match serde_json::to_value(&status) {
+                    Ok(mut json) => {
+                        json["input_device"] =
+                            mic.as_ref().map(input_device_json).unwrap_or(Value::Null);
+                        tool_success(&json, lead)
+                    }
+                    Err(error) => {
+                        CallFailure::Service(ComlinkError::Json(error)).into_tool_result()
+                    }
+                }
             }
             Err(failure) => failure.into_tool_result(),
         })
@@ -780,6 +842,73 @@ mod tests {
             checked_session_id(Some("meeting-20260924-abc_1".to_string())).unwrap(),
             Some("meeting-20260924-abc_1".to_string())
         );
+    }
+
+    #[test]
+    fn every_source_arg_is_a_service_source_mode() {
+        for (arg, mode) in [
+            (MeetingSourceArg::MicOnly, meet::MeetSourceMode::MicOnly),
+            (
+                MeetingSourceArg::SystemOnly,
+                meet::MeetSourceMode::SystemOnly,
+            ),
+            (
+                MeetingSourceArg::MicPlusSystem,
+                meet::MeetSourceMode::MicPlusSystem,
+            ),
+        ] {
+            assert_eq!(meet::MeetSourceMode::parse(arg.as_str()), Some(mode));
+            // The wire name the schema advertises is the one the service parses.
+            let wire: MeetingSourceArg = serde_json::from_value(json!(arg.as_str())).unwrap();
+            assert_eq!(wire, arg);
+        }
+    }
+
+    #[test]
+    fn input_device_line_names_the_microphone_for_every_selection() {
+        let device = |name: Option<&str>, source| ResolvedRecordDevice {
+            avfoundation_input: ":1".to_string(),
+            name: name.map(str::to_string),
+            source,
+        };
+        // System default: the historical `meet start` stderr line.
+        assert_eq!(
+            input_device_line(&device(
+                Some("MacBook Pro Microphone"),
+                DeviceSource::SystemDefault
+            )),
+            "Using system default input device: MacBook Pro Microphone (:1)"
+        );
+        assert_eq!(
+            input_device_line(&device(None, DeviceSource::SystemDefault)),
+            "Using system default input device :1"
+        );
+        let fallback = input_device_line(&device(None, DeviceSource::Fallback));
+        assert!(
+            fallback.starts_with("Using fallback input device :1"),
+            "{fallback}"
+        );
+        assert!(fallback.contains("pass `device`"), "{fallback}");
+        assert_eq!(
+            input_device_line(&device(Some("USB Mic"), DeviceSource::Flag)),
+            "Using input device USB Mic (:1) (from the `device` argument)"
+        );
+        assert_eq!(
+            input_device_line(&device(None, DeviceSource::Env)),
+            "Using input device :1 (from COMLINK_RECORD_DEVICE)"
+        );
+        let json = input_device_json(&device(Some("USB Mic"), DeviceSource::Env));
+        assert_eq!(
+            json,
+            json!({"avfoundation_input": ":1", "name": "USB Mic", "selected_by": "COMLINK_RECORD_DEVICE"})
+        );
+    }
+
+    #[test]
+    fn panic_payload_text_is_kept() {
+        assert_eq!(panic_detail(Box::new("boom")), "boom");
+        assert_eq!(panic_detail(Box::new(String::from("kaboom 7"))), "kaboom 7");
+        assert_eq!(panic_detail(Box::new(7_u8)), "non-string panic payload");
     }
 
     #[test]

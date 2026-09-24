@@ -118,8 +118,14 @@ comlink doctor                            # shows mcp-server (binary path) and m
 ```
 
 `COMLINK_MCP_ALLOW_START=true|false` overrides the config file for one
-process; `config set` warns when the variable is set and disagrees. Status,
-stop, list and transcript reads work regardless of `mcp.allow_start`.
+process; `config set` warns when the variable is set and disagrees (or is not
+a boolean, which makes every config load fail). Status, stop, list and
+transcript reads work regardless of `mcp.allow_start`.
+
+`config set` rewrites `config.json` atomically (temp file + rename, mode
+0600), so a running `comlink mcp` never reads a half-written file. If
+`config.json` is a symlink (for example into a dotfiles repo), the link is
+replaced by a regular file; edit the link target by hand instead.
 
 MCP clients do not inherit your shell profile. Persist the model with
 `comlink models select base --path /path/to/ggml-base.en.bin`, and pass tool
