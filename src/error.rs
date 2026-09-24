@@ -86,6 +86,13 @@ pub enum ComlinkError {
     #[error("meeting export is not available: {0}")]
     MeetingExportUnavailable(PathBuf),
 
+    #[error("meeting export at {path} is invalid ({reason}); fix or remove the invalid export at {path}, then rerun `comlink meet finalize {id}`")]
+    MeetingExportInvalid {
+        id: String,
+        path: PathBuf,
+        reason: String,
+    },
+
     #[error("meeting session is not awaiting finalize (still recording): {0}")]
     MeetingNotTranscribing(String),
 
@@ -208,6 +215,15 @@ mod tests {
             ComlinkError::MeetingChunkCleanupFailed {
                 id: "s1".to_string(),
                 reason: "denied".to_string(),
+            }
+            .exit_code(),
+            1
+        );
+        assert_eq!(
+            ComlinkError::MeetingExportInvalid {
+                id: "s1".to_string(),
+                path: "s1/transcript.json".into(),
+                reason: "eof".to_string(),
             }
             .exit_code(),
             1

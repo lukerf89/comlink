@@ -1279,7 +1279,15 @@ fn finalize_never_overwrites_an_invalid_export_on_a_stopped_session() {
     let error =
         meet_service::finalize(&ctx, &started.session_id, Duration::from_secs(1)).unwrap_err();
     assert!(
-        matches!(error, ComlinkError::MeetingExportUnavailable(_)),
+        matches!(&error, ComlinkError::MeetingExportInvalid { id, .. } if id == &started.session_id),
+        "{error}"
+    );
+    assert_eq!(error.exit_code(), 1);
+    assert!(
+        error.to_string().contains(&format!(
+            "fix or remove the invalid export at {}, then rerun `comlink meet finalize {}`",
+            session.json_export_path, started.session_id
+        )),
         "{error}"
     );
     assert_eq!(harness.whisper_invocations(), 2, "ASR must not re-run");
@@ -1292,4 +1300,272 @@ fn finalize_never_overwrites_an_invalid_export_on_a_stopped_session() {
         MeetingStatus::Stopped
     );
     assert_eq!(wav_count(&session.chunks_dir), 2);
+}
+
+// ---------------------------------------------------------------------------
+// LF-161 final round (N1..N4)
+// ---------------------------------------------------------------------------
+
+/// A `failed` mic+system session (chunks under `chunks/<label>/`) with
+/// retention off and two WAVs in each per-stream dir.
+fn dual_stream_failed_session(
+    store: &meet::FileMeetingStore,
+    id: &str,
+) -> meet::MeetingSessionState {
+    let session_dir = store.root().join(id);
+    let paths = meet::NewMeetingPaths {
+        session_id: id.to_string(),
+        chunks_dir: session_dir.join("chunks"),
+        recorder_stderr_path: session_dir.join("capture.stderr"),
+        segments_jsonl_path: session_dir.join("segments.jsonl"),
+        json_export_path: session_dir.join("transcript.json"),
+        markdown_export_path: session_dir.join("transcript.md"),
+        session_dir,
+    };
+    let source = meet::MeetingSourceMetadata::new(
+        meet::MeetSourceMode::MicPlusSystem,
+        vec![
+            stream(meet::MeetingSourceLabel::UserMic),
+            stream(meet::MeetingSourceLabel::SystemAudio),
+        ],
+    )
+    .with_session_paths(&paths.chunks_dir, &paths.recorder_stderr_path, true);
+    let mut session = meet::new_recording_session(new_session(&paths, source));
+    session.mark_failed("mock");
+    store.save_session(&session).unwrap();
+    for stream in &session.source.streams {
+        let dir = stream.chunks_dir.as_deref().unwrap();
+        assert!(dir.starts_with(&session.chunks_dir) && dir != session.chunks_dir);
+        fs::create_dir_all(dir).unwrap();
+        for index in 0..2 {
+            fs::write(
+                Path::new(dir).join(format!("chunk-0000{index}.wav")),
+                "leftover",
+            )
+            .unwrap();
+        }
+    }
+    session
+}
+
+#[test]
+fn dual_stream_audit_is_not_clean_when_the_parent_chunks_dir_is_unsearchable() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let store = harness.store();
+    let session = dual_stream_failed_session(&store, "dual-stream");
+    let mic_dir = session.source.streams[0].chunks_dir.clone().unwrap();
+
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    assert!(!audit.clean);
+    assert_eq!(audit.unretained_leftovers[0].chunk_files, 4, "{audit:?}");
+
+    // The parent chunks/ is not searchable: the per-stream dirs cannot even
+    // be stat'ed, which must not read as "empty".
+    set_mode(&session.chunks_dir, 0o000);
+    let listed = store.chunk_files(&session);
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    set_mode(&session.chunks_dir, 0o755);
+
+    let error = listed.expect_err("an unsearchable chunks dir is not empty");
+    assert!(error.to_string().contains(&mic_dir), "{error}");
+    assert!(!audit.clean, "false clean: {audit:?}");
+    assert_eq!(audit.unretained_leftovers.len(), 1, "{audit:?}");
+    let entry = &audit.unretained_leftovers[0];
+    assert_eq!(entry.session_id, "dual-stream");
+    assert!(entry.reason.contains("unreadable chunks dir"), "{entry:?}");
+    assert!(
+        entry.reason.contains(&mic_dir),
+        "stream path not named: {entry:?}"
+    );
+}
+
+#[test]
+fn chunk_cleanup_fails_instead_of_skipping_an_uninspectable_chunks_dir() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let store = harness.store();
+    let session = dual_stream_failed_session(&store, "dual-stream");
+
+    // The session dir is not searchable, so chunks/ cannot be inspected.
+    set_mode(&session.session_dir, 0o000);
+    let result = store.delete_chunks(&session);
+    set_mode(&session.session_dir, 0o755);
+
+    let error = result.expect_err("cleanup must not report success");
+    assert!(error.to_string().contains(&session.chunks_dir), "{error}");
+    assert_eq!(
+        wav_count(session.source.streams[0].chunks_dir.as_deref().unwrap()),
+        2
+    );
+    // A chunks dir that really does not exist is a no-op.
+    store.delete_chunks(&session).unwrap();
+    store.delete_chunks(&session).unwrap();
+    assert!(!Path::new(&session.chunks_dir).exists());
+}
+
+#[test]
+fn meeting_audio_audit_counts_wavs_under_a_moved_session_dir() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let store = harness.store();
+    let mut session = constructed_session(&store, "moved");
+    session.mark_failed("mock");
+    // Normal layout: stored and on-disk chunks are the same WAVs, counted once.
+    plant_leftover_chunks(&session);
+    store.save_session(&session).unwrap();
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    assert_eq!(audit.unretained_leftovers[0].chunk_files, 2, "{audit:?}");
+    assert_eq!(
+        audit.unretained_leftovers[0].remedy,
+        "comlink meet finalize moved"
+    );
+
+    // Restored from elsewhere: session.json records absolute chunk paths that
+    // no longer exist, while the WAVs sit under <session_dir>/chunks.
+    let old = "/nonexistent-comlink-old-data/meetings/moved/chunks".to_string();
+    session.chunks_dir = old.clone();
+    for stream in &mut session.source.streams {
+        stream.chunks_dir = Some(old.clone());
+    }
+    store.save_session(&session).unwrap();
+
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    assert!(!audit.clean, "moved WAVs hidden: {audit:?}");
+    assert_eq!(audit.unretained_leftovers.len(), 1, "{audit:?}");
+    let entry = &audit.unretained_leftovers[0];
+    assert_eq!(entry.chunk_files, 2);
+    let on_disk = store
+        .root()
+        .join("moved")
+        .join("chunks")
+        .display()
+        .to_string();
+    assert!(entry.reason.contains(&on_disk), "{entry:?}");
+    assert!(entry.reason.contains("outside the chunks dir"), "{entry:?}");
+    assert!(entry.remedy.contains(&on_disk), "{entry:?}");
+}
+
+#[test]
+fn invalid_export_remedy_is_truthful_and_failed_sessions_never_overwrite_it() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let started = harness.start(&ctx, 2);
+    meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+    let store = harness.store();
+    let id = started.session_id.clone();
+    let session = store.read_session(&id).unwrap();
+    let edited = "{\"edited\": \"by the user\"}";
+    fs::write(&session.json_export_path, edited).unwrap();
+    plant_leftover_chunks(&session);
+
+    // Stopped: the audit must not point at a finalize that always fails.
+    let expected_remedy = format!(
+        "fix or remove the invalid export at {}, then run `comlink meet finalize {id}`",
+        session.json_export_path
+    );
+    let audit = meet_service::meeting_audio_audit(&ctx);
+    let entry = &audit.unretained_leftovers[0];
+    assert_eq!(entry.remedy, expected_remedy, "{entry:?}");
+    assert!(entry.reason.contains("is invalid"), "{entry:?}");
+
+    // Failed (same export, same chunks): finalize refuses to overwrite it too.
+    let mut failed = session.clone();
+    failed.mark_failed("mock");
+    store.save_session(&failed).unwrap();
+    let error = meet_service::finalize(&ctx, &id, Duration::from_secs(1)).unwrap_err();
+    assert!(
+        matches!(&error, ComlinkError::MeetingExportInvalid { .. }),
+        "{error}"
+    );
+    assert_eq!(error.exit_code(), 1);
+    assert_eq!(harness.whisper_invocations(), 2, "ASR must not re-run");
+    assert_eq!(
+        fs::read_to_string(&session.json_export_path).unwrap(),
+        edited
+    );
+    assert_eq!(wav_count(&session.chunks_dir), 2);
+    let entry = &meet_service::meeting_audio_audit(&ctx).unretained_leftovers[0];
+    assert_eq!(entry.status, "failed");
+    assert_eq!(entry.remedy, expected_remedy);
+
+    // Following the remedy works: remove the export, then finalize.
+    fs::remove_file(&session.json_export_path).unwrap();
+    let status = meet_service::finalize(&ctx, &id, Duration::from_secs(1)).unwrap();
+    assert_eq!(status.status, "stopped");
+    assert!(!Path::new(&session.chunks_dir).exists());
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
+}
+
+#[test]
+fn sync_stop_export_write_failure_is_failed_and_finalize_retries() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let started = harness.start(&ctx, 2);
+    let store = harness.store();
+    let session = store.read_session(&started.session_id).unwrap();
+
+    // A directory where segments.jsonl goes: the export write fails after ASR.
+    fs::create_dir_all(&session.segments_jsonl_path).unwrap();
+    let error = meet_service::stop(&ctx, None, STOP_WAIT).unwrap_err();
+    assert!(matches!(error, ComlinkError::Io(_)), "{error}");
+    assert_eq!(error.exit_code(), 1);
+    assert_eq!(harness.whisper_invocations(), 2);
+
+    let failed = store.read_session(&started.session_id).unwrap();
+    assert_eq!(
+        failed.status,
+        MeetingStatus::Failed,
+        "must not stay stopped"
+    );
+    assert_eq!(failed.error.as_deref(), Some(error.to_string().as_str()));
+    assert_eq!(failed.chunks_processed, Some(2));
+    assert_eq!(
+        wav_count(&session.chunks_dir),
+        2,
+        "audio kept for the retry"
+    );
+    assert!(store.active_session_id().unwrap().is_none());
+
+    fs::remove_dir(&session.segments_jsonl_path).unwrap();
+    let status = meet_service::finalize(&ctx, &started.session_id, Duration::from_secs(1)).unwrap();
+    assert_eq!(status.status, "stopped");
+    assert_eq!(status.chunks_processed, 2);
+    assert!(!Path::new(&session.chunks_dir).exists());
+    let stopped = store.read_session(&started.session_id).unwrap();
+    assert_eq!(stopped.status, MeetingStatus::Stopped);
+    assert!(stopped.error.is_none());
+    assert!(meet_service::meeting_audio_audit(&ctx).clean);
+}
+
+#[test]
+fn finalize_repairs_a_preliminary_stopped_snapshot_left_by_a_failed_final_save() {
+    let harness = ServiceHarness::new(MockOptions::default());
+    let ctx = harness.ctx(Arc::new(NoopLauncher));
+    let started = harness.start(&ctx, 2);
+    let stopped = meet_service::stop(&ctx, None, STOP_WAIT).unwrap();
+    let store = harness.store();
+    let id = started.session_id.clone();
+    let final_session = store.read_session(&id).unwrap();
+    assert!(stopped.segment_count > 0);
+
+    // What session.json holds when the final save fails after the chunk
+    // delete: the preliminary `stopped` (no segments, probe duration) plus the
+    // chunks_processed recorded before the exports.
+    let mut preliminary = final_session.clone();
+    preliminary.segment_count = 0;
+    preliminary.duration_ms = Some(1);
+    preliminary.chunks_processed = Some(2);
+    store.save_session(&preliminary).unwrap();
+
+    let status = meet_service::finalize(&ctx, &id, Duration::from_secs(1)).unwrap();
+    assert_eq!(status.segment_count, stopped.segment_count);
+    assert_eq!(status.duration_ms, stopped.duration_ms);
+    assert_eq!(status.chunks_processed, 2);
+    let repaired = store.read_session(&id).unwrap();
+    assert_eq!(repaired.status, MeetingStatus::Stopped);
+    assert_eq!(repaired.segment_count, stopped.segment_count);
+    assert_eq!(repaired.duration_ms, Some(stopped.duration_ms));
+    assert_eq!(repaired.stopped_at_ms, final_session.stopped_at_ms);
+    assert_eq!(repaired.chunks_processed, Some(2));
+    assert_eq!(harness.whisper_invocations(), 2, "no ASR for a repair");
 }

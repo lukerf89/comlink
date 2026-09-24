@@ -1,10 +1,10 @@
 {
   "schema_version": "comlink.meeting.v1",
   "session": {
-    "session_id": "s1790226327325322000-25754-0",
+    "session_id": "s1790227774994977000-30624-0",
     "status": "stopped",
-    "started_at_ms": 1790226327325,
-    "stopped_at_ms": 1790226327513,
+    "started_at_ms": 1790227774994,
+    "stopped_at_ms": 1790227775220,
     "duration_ms": 60000,
     "mode": "raw",
     "source": "user_mic device :0",
@@ -46,10 +46,10 @@
     "detail": "ASR did not expose VAD segment timing; Comlink used capture chunk boundaries"
   },
   "artifacts": {
-    "session_dir": "<tmp>/comlink-data/meetings/s1790226327325322000-25754-0",
-    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790226327325322000-25754-0/segments.jsonl",
-    "json_export": "<tmp>/comlink-data/meetings/s1790226327325322000-25754-0/transcript.json",
-    "markdown_export": "<tmp>/comlink-data/meetings/s1790226327325322000-25754-0/transcript.md",
+    "session_dir": "<tmp>/comlink-data/meetings/s1790227774994977000-30624-0",
+    "segments_jsonl": "<tmp>/comlink-data/meetings/s1790227774994977000-30624-0/segments.jsonl",
+    "json_export": "<tmp>/comlink-data/meetings/s1790227774994977000-30624-0/transcript.json",
+    "markdown_export": "<tmp>/comlink-data/meetings/s1790227774994977000-30624-0/transcript.md",
     "chunks_dir": null
   },
   "raw_text": "Phase 10a fixture segment 00000.\nPhase 10a fixture segment 00001.",

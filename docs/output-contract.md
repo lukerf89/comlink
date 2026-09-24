@@ -81,7 +81,7 @@ A meeting session's `status` is one of:
 - `recording`: recorders are capturing chunks.
 - `transcribing`: recorders are stopped and a detached `meet finalize` owns transcription (only after `meet stop --detach`).
 - `stopped`: the transcript exports are written.
-- `failed`: a detached finalize failed. The session carries an `error` string (error text only, never transcript content). Rerun `comlink meet finalize <id>` to retry.
+- `failed`: a detached finalize failed, or a synchronous `meet stop` failed after ASR (an export write or the chunk cleanup). The session carries an `error` string (error text only, never transcript content). Rerun `comlink meet finalize <id>` to retry.
 
 `transcribing` and `failed` are additive in Phase 10a. A plain synchronous `meet stop` never produces them.
 
@@ -174,12 +174,13 @@ This command is read-only. With no id it reports the active recording session, o
 
 The scan is conservative and best-effort. `unretained_leftovers` lists:
 
-- every non-`recording` meeting whose `retention.audio` is `false` but whose chunk WAVs are still on disk (`stopped`, `failed`, or still `transcribing`); remedy `comlink meet finalize <id>`;
+- every non-`recording` meeting whose `retention.audio` is `false` but whose chunk WAVs are still on disk (`stopped`, `failed`, or still `transcribing`); remedy `comlink meet finalize <id>`. When that meeting's JSON export exists but is invalid, `meet finalize` will not overwrite it, so `reason` says the export is invalid and `remedy` reads: fix or remove the invalid export at `<path>`, then run `comlink meet finalize <id>`;
+- chunk WAVs are counted both under the chunk paths recorded in `session.json` and under `<session_dir>/chunks` on disk (two levels deep), without double counting. WAVs found only on disk (a moved or restored data dir whose recorded absolute paths point elsewhere) are listed with a `reason` that says so and a `remedy` naming the on-disk directory, because `meet finalize` deletes only the recorded chunks directory;
 - every `recording` meeting whose `retention.audio` is `false`, whose chunk WAVs are on disk, and whose recorder is not verified running (a stale recording); remedy `comlink meet stop <id>`. A recording whose recorder is verified running is not listed;
-- any such meeting whose chunks directory cannot be read (`chunk_files` is `0`, and `reason` names the directory);
+- any such meeting whose chunks directory, or a per-stream chunks directory under it, cannot be inspected (`chunk_files` is `0`, and `reason` names the path that failed). Only a directory that does not exist counts as empty: a parent `chunks/` that is not searchable is reported, not read as empty;
 - any session directory whose `session.json` is missing or unreadable but which holds chunk WAVs (searched two levels deep under `<session_dir>/chunks`) or whose chunks directory cannot be read. Its retention policy is unknown, so `status` is `unknown`, `session_id` is the directory name, and `remedy` names the directory.
 
-A directory that cannot be read never fails the audit. A failure to list the meetings store itself is recorded in `scan_errors`. `clean` is `true` only when both lists are empty. `session_dir`, `reason` and `scan_errors` were added in the LF-161 micro-round (additive). `--format text` prints `meeting_audio: clean=<bool> unretained_leftovers=<n> scan_errors=<n>`, then one `meeting_audio_leftover:` line per entry (ending in `reason=...`) and one `meeting_audio_scan_error:` line per scan error.
+A directory that cannot be read never fails the audit. A failure to list the meetings store itself is recorded in `scan_errors` against the store root; a store entry whose type cannot be read is recorded against that entry's path. `clean` is `true` only when both lists are empty. `session_dir`, `reason` and `scan_errors` were added in the LF-161 micro-round (additive). `--format text` prints `meeting_audio: clean=<bool> unretained_leftovers=<n> scan_errors=<n>`, then one `meeting_audio_leftover:` line per entry (ending in `reason=...`) and one `meeting_audio_scan_error:` line per scan error.
 
 ### Meeting exit codes
 
@@ -187,8 +188,9 @@ The codes in the table below are unchanged. The meeting-specific cases are:
 
 - `meet status` exits `0` for any readable state, including `none`. An unknown session id exits `1`.
 - `meet status` exits `1` (`meeting session <id> is unreadable ...`) when the session it would report has a `session.json` that exists but cannot be read or parsed: the named session, the active session, or, for a bare `meet status` with no recording or `transcribing` session, any session in the store. It never reports `none` in that case. A directory without a `session.json` is not a session and is ignored.
-- `meet finalize`, and a synchronous `meet stop`, exit `1` when the unretained chunk cleanup fails. The error names the chunks directory. The session is left `failed`, not `stopped`, with its exports on disk, and `meet finalize <id>` recovers from the export without re-running ASR, retries the delete and commits `stopped`. A successful `meet stop` prints the same output as before.
-- `meet finalize` on a `stopped` session transcribes the chunks only when no JSON export exists at all (a synchronous stop whose ASR failed). If a JSON export exists but does not validate (for example, it was edited), `meet finalize` exits `1` with `meeting export is not available: ...` and leaves the export, the chunks and the session unchanged.
+- `meet finalize`, and a synchronous `meet stop`, exit `1` when the unretained chunk cleanup fails, including when the chunks directory cannot be inspected. The error names the chunks directory. The session is left `failed`, not `stopped`, with its exports on disk, and `meet finalize <id>` recovers from the export without re-running ASR, retries the delete and commits `stopped`. A successful `meet stop` prints the same output as before.
+- A synchronous `meet stop` whose export write fails after ASR saves the session `failed` with that error and exits with the error's code (`1` for an I/O error); the chunks stay on disk and `meet finalize <id>` retries. If only the final `stopped` save fails, a later `meet finalize <id>` repairs `session.json` (`segment_count`, `duration_ms`, `stopped_at_ms`) from the valid export.
+- `meet finalize` on a `stopped` session transcribes the chunks only when no JSON export exists at all (a synchronous stop whose ASR failed). In any status, if a JSON export exists but does not validate (for example, it was edited) and chunks remain, `meet finalize` exits `1` with an error that reads: meeting export at `<path>` is invalid (...); fix or remove the invalid export at `<path>`, then rerun `comlink meet finalize <id>`. It never overwrites that export and never deletes the chunks. A `stopped` session is left unchanged; a `transcribing` or `failed` one is saved `failed` with that error.
 - `meet export` with no id exits `1` when the newest non-recording session is still `transcribing` or its finalize `failed`, instead of exporting an older meeting. The error names the session and the `meet status <id>` command.
 - Another comlink process holding the session's lifecycle lock exits `1` (`meeting session is busy`).
 - A detached finalizer that cannot be launched exits `1`, and the session is marked `failed`.

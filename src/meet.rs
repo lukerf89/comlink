@@ -1361,11 +1361,16 @@ impl FileMeetingStore {
         &self,
         session: &MeetingSessionState,
     ) -> Result<(), ComlinkError> {
+        // Only "does not exist" is a no-op: a chunks dir that cannot be
+        // inspected is an error, never a silent success.
         let chunks_dir = Path::new(&session.chunks_dir);
-        if chunks_dir.exists() {
-            fs::remove_dir_all(chunks_dir)?;
+        match fs::symlink_metadata(chunks_dir) {
+            Ok(_) => {
+                fs::remove_dir_all(chunks_dir).map_err(|error| path_io_error(chunks_dir, error))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(path_io_error(chunks_dir, error)),
         }
-        Ok(())
     }
 
     pub fn write_segments_jsonl(&self, export: &MeetingExport) -> Result<(), ComlinkError> {
@@ -1564,23 +1569,49 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ComlinkError> {
     Ok(())
 }
 
+/// Chunk WAVs directly in `chunks_dir`, sorted. Only a `chunks_dir` that does
+/// not exist (or is not a directory) counts as empty; any other failure to
+/// inspect it or one of its entries (for example, a parent directory that is
+/// not searchable) is an error that names the path, so callers never mistake
+/// an unreadable directory for an empty one.
 fn chunk_paths_in_dir(chunks_dir: &Path) -> Result<Vec<PathBuf>, ComlinkError> {
-    if !chunks_dir.is_dir() {
-        return Ok(Vec::new());
+    match fs::metadata(chunks_dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(path_io_error(chunks_dir, error)),
     }
-    let mut paths = fs::read_dir(chunks_dir)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry
-                .file_type()
-                .map(|kind| kind.is_file())
-                .unwrap_or(false)
-        })
-        .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|value| value.to_str()) == Some("wav"))
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(chunks_dir).map_err(|error| path_io_error(chunks_dir, error))? {
+        let entry = entry.map_err(|error| path_io_error(chunks_dir, error))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .map_err(|error| path_io_error(&path, error))?;
+        if kind.is_file() && path.extension().and_then(|value| value.to_str()) == Some("wav") {
+            paths.push(path);
+        }
+    }
     paths.sort();
     Ok(paths)
+}
+
+/// An I/O error whose message starts with the path it concerns.
+fn path_io_error(path: &Path, error: std::io::Error) -> ComlinkError {
+    ComlinkError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{}: {error}", path.display()),
+    ))
+}
+
+/// True unless `path` is known not to exist. A path that cannot be inspected
+/// (for example, behind a directory that is not searchable) may exist, so it
+/// counts as present.
+pub fn path_may_exist(path: &Path) -> bool {
+    match fs::symlink_metadata(path) {
+        Ok(_) => true,
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
 }
 
 fn discover_chunks_in_dir(

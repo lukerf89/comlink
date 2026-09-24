@@ -419,8 +419,9 @@ pub fn stop(
 /// Synchronous stop for a session returned by [`prepare_stop`]. Keeps the
 /// historical ordering: the session is marked stopped (and the active pointer
 /// cleared) before ASR, so an ASR failure leaves it stopped without exports.
-/// After ASR it writes the exports, deletes unretained chunks, then saves the
-/// final `stopped`; a failed chunk delete leaves the session `failed`.
+/// After ASR it records `chunks_processed`, writes the exports, deletes
+/// unretained chunks, then saves the final `stopped`; a failed export write or
+/// chunk delete leaves the session `failed` for `meet finalize` to retry.
 pub fn stop_prepared(
     ctx: &MeetContext,
     mut session: MeetingSessionState,
@@ -451,22 +452,37 @@ pub fn stop_prepared(
     let runtime = ctx.runtime_for_model(&session.model_path)?;
     let pipeline = transcribe_session(&store, &session, &runtime, &ctx.resolved.config)?;
 
-    session.mark_stopped(stopped_at_ms, pipeline.duration_ms, pipeline.segments.len());
+    // Record progress on the preliminary `stopped` before writing artifacts,
+    // so a finalize that repairs session.json from the export (after a failed
+    // final save) still knows how many chunks were processed.
     session.chunks_processed = Some(pipeline.chunks.len());
-    let export = export_from_pipeline(&session, &pipeline);
-
-    // Same ordering as detached finalize: exports, then unretained audio, then
-    // the final `stopped` save. Until that save, session.json holds the
-    // preliminary `stopped` written before ASR. If the chunk delete fails the
-    // session is saved `failed` (exports are on disk), so `meet finalize <id>`
-    // recovers from the export, retries the delete and commits `stopped`.
-    store.write_segments_jsonl(&export)?;
-    store.write_exports(&export)?;
-    if let Err(error) = delete_unretained_chunks(&store, &session) {
+    if let Err(error) = store.save_session(&session) {
         session.mark_failed(error.to_string());
         record_failed_state(&store, &session, &error);
         return Err(error);
     }
+
+    session.mark_stopped(stopped_at_ms, pipeline.duration_ms, pipeline.segments.len());
+    let export = export_from_pipeline(&session, &pipeline);
+
+    // Same ordering as detached finalize: exports, then unretained audio, then
+    // the final `stopped` save. Until that save, session.json holds the
+    // preliminary `stopped` written before ASR. If an export write or the
+    // chunk delete fails, the session is saved `failed` with the original
+    // error, so `meet finalize <id>` retries (from the export when it is on
+    // disk, else by transcribing the chunks) and commits `stopped`.
+    let committed = store
+        .write_segments_jsonl(&export)
+        .and_then(|()| store.write_exports(&export))
+        .and_then(|()| delete_unretained_chunks(&store, &session));
+    if let Err(error) = committed {
+        session.mark_failed(error.to_string());
+        record_failed_state(&store, &session, &error);
+        return Err(error);
+    }
+    // If this final save fails, session.json keeps the preliminary `stopped`
+    // (with `chunks_processed`); `meet finalize <id>` repairs it from the
+    // export.
     store.save_session(&session)?;
 
     Ok(stop_status_from_export(
@@ -568,8 +584,11 @@ pub fn stop_detached_prepared(
 /// session with a valid export it returns the same status rebuilt from that
 /// export without re-transcribing, after deleting any chunks left behind while
 /// `retention.audio` is off. A `stopped` session with no JSON export at all but
-/// with chunks on disk (a synchronous stop whose ASR failed) is transcribed; a
-/// `stopped` session whose JSON export exists but is invalid is an error.
+/// with chunks on disk (a synchronous stop whose ASR failed) is transcribed.
+/// In any status, a JSON export that exists but is invalid is never
+/// overwritten from the chunks: finalize returns `MeetingExportInvalid`. A
+/// `stopped` session.json that disagrees with its valid export (a final save
+/// that failed) is repaired from the export.
 pub fn finalize(
     ctx: &MeetContext,
     id: &str,
@@ -585,6 +604,10 @@ pub fn finalize(
         }
         MeetingStatus::Stopped => match store.validate_export_for_recovery(&session) {
             Ok(export) => {
+                // A final save that failed after the export landed leaves the
+                // preliminary `stopped` snapshot; bring session.json in line
+                // with the validated export before reporting success.
+                repair_stopped_session_from_export(&store, &mut session, &export)?;
                 // Only after the export is validated on disk may chunks go;
                 // regenerate a missing Markdown/JSONL from it first.
                 if session_chunk_count(&store, &session)? > 0 && !session.retention.audio {
@@ -607,13 +630,14 @@ pub fn finalize(
             // stop whose ASR failed) and chunks on disk is transcribed. A JSON
             // export that exists but does not validate is reported, never
             // overwritten: it may have been edited by the user.
-            Err(error)
-                if Path::new(&session.json_export_path).exists()
-                    || session_chunk_count(&store, &session)? == 0 =>
-            {
-                return Err(error)
+            Err(error) => {
+                if session_chunk_count(&store, &session)? == 0 {
+                    return Err(error);
+                }
+                if let Some(invalid) = invalid_export_error(&session, &error) {
+                    return Err(invalid);
+                }
             }
-            Err(_) => {}
         },
         MeetingStatus::Transcribing | MeetingStatus::Failed => {}
     }
@@ -663,6 +687,61 @@ fn append_finalize_log(session: &MeetingSessionState, line: &str) {
     }
 }
 
+/// When the session's JSON export exists (or cannot be ruled out) but did not
+/// validate, the error finalize reports instead of overwriting it: the export
+/// may have been edited by the user, so it is never silently replaced.
+fn invalid_export_error(
+    session: &MeetingSessionState,
+    validation: &ComlinkError,
+) -> Option<ComlinkError> {
+    let path = Path::new(&session.json_export_path);
+    if !meet::path_may_exist(path) {
+        return None;
+    }
+    // validate_export_for_recovery reports `<path> (<reason>)`; keep the reason.
+    let reason = match validation {
+        ComlinkError::MeetingExportUnavailable(detail) => {
+            let detail = detail.display().to_string();
+            detail
+                .strip_prefix(&format!("{} (", path.display()))
+                .and_then(|rest| rest.strip_suffix(')'))
+                .map(str::to_string)
+                .unwrap_or(detail)
+        }
+        other => other.to_string(),
+    };
+    Some(ComlinkError::MeetingExportInvalid {
+        id: session.session_id.clone(),
+        path: path.to_path_buf(),
+        reason,
+    })
+}
+
+/// Rewrite a `stopped` session.json whose recorded totals disagree with its
+/// validated export (the preliminary snapshot left by a synchronous stop whose
+/// final save failed). A no-op when they already agree.
+fn repair_stopped_session_from_export(
+    store: &meet::FileMeetingStore,
+    session: &mut MeetingSessionState,
+    export: &meet::MeetingExport,
+) -> Result<(), ComlinkError> {
+    let stopped_at_ms = export.session.stopped_at_ms.or(session.stopped_at_ms);
+    if session.segment_count == export.session.segment_count
+        && session.duration_ms == Some(export.session.duration_ms)
+        && session.stopped_at_ms == stopped_at_ms
+    {
+        return Ok(());
+    }
+    let chunks_processed = session.chunks_processed;
+    session.mark_stopped(
+        stopped_at_ms.unwrap_or_else(meet::now_ms),
+        export.session.duration_ms,
+        export.session.segment_count,
+    );
+    session.chunks_processed = chunks_processed;
+    store.save_session(session)
+}
+
 fn session_chunk_count(
     store: &meet::FileMeetingStore,
     session: &MeetingSessionState,
@@ -701,10 +780,21 @@ fn finalize_transcribing(
     let artifacts_complete = Path::new(&session.markdown_export_path).is_file()
         && Path::new(&session.segments_jsonl_path).is_file();
 
-    if let Ok(export) = &recovered {
-        if artifacts_complete || chunk_count == 0 {
+    match &recovered {
+        Ok(export) if artifacts_complete || chunk_count == 0 => {
             return recover_from_export(store, session, export.clone());
         }
+        Ok(_) => {}
+        // Same rule as a `stopped` session: an existing JSON export that does
+        // not validate is reported, never overwritten from the chunks. (With
+        // no chunks there is nothing to overwrite it from; that case is
+        // reported just below.)
+        Err(error) if chunk_count > 0 => {
+            if let Some(invalid) = invalid_export_error(session, error) {
+                return Err(invalid);
+            }
+        }
+        Err(_) => {}
     }
     if chunk_count == 0 {
         let reason = recovered
@@ -1302,17 +1392,16 @@ pub fn meeting_audio_audit(ctx: &MeetContext) -> MeetingAudioAudit {
         }
     };
 
-    let mut dirs = Vec::new();
-    for entry in entries {
-        match entry.and_then(|entry| Ok((entry.file_type()?, entry.path()))) {
-            Ok((kind, path)) if kind.is_dir() => dirs.push(path),
-            Ok(_) => {}
-            Err(error) => scan_errors.push(MeetingAudioScanError {
-                path: root.display().to_string(),
-                reason: format!("could not read a meeting session entry: {error}"),
-            }),
-        }
-    }
+    let mut dirs = collect_session_dirs(
+        &root,
+        entries.map(|entry| {
+            entry.map(|entry| {
+                let path = entry.path();
+                (path, entry.file_type().map(|kind| kind.is_dir()))
+            })
+        }),
+        &mut scan_errors,
+    );
     dirs.sort();
 
     for dir in dirs {
@@ -1322,7 +1411,7 @@ pub fn meeting_audio_audit(ctx: &MeetContext) -> MeetingAudioAudit {
             .unwrap_or_default();
         match store.read_session(&id) {
             Ok(session) => {
-                if let Some(leftover) = readable_session_leftover(&store, session) {
+                if let Some(leftover) = readable_session_leftover(&store, &dir, session) {
                     leftovers.push(leftover);
                 }
             }
@@ -1341,8 +1430,39 @@ pub fn meeting_audio_audit(ctx: &MeetContext) -> MeetingAudioAudit {
     }
 }
 
+/// Session directories among the store root's entries. An entry that cannot
+/// be read at all is recorded against the root (it has no path yet); an entry
+/// whose type cannot be read is recorded against its own path.
+fn collect_session_dirs(
+    root: &Path,
+    entries: impl Iterator<Item = std::io::Result<(PathBuf, std::io::Result<bool>)>>,
+    scan_errors: &mut Vec<MeetingAudioScanError>,
+) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for entry in entries {
+        match entry {
+            Ok((path, Ok(true))) => dirs.push(path),
+            Ok((_, Ok(false))) => {}
+            Ok((path, Err(error))) => scan_errors.push(MeetingAudioScanError {
+                path: path.display().to_string(),
+                reason: format!("could not read the type of a meeting session entry: {error}"),
+            }),
+            Err(error) => scan_errors.push(MeetingAudioScanError {
+                path: root.display().to_string(),
+                reason: format!("could not read a meeting session entry: {error}"),
+            }),
+        }
+    }
+    dirs
+}
+
+/// `dir` is the session directory as found on disk. Besides the chunk paths
+/// recorded in session.json, WAVs under `<dir>/chunks` are counted too, so a
+/// moved or restored data dir (whose recorded absolute paths point elsewhere)
+/// cannot hide audio.
 fn readable_session_leftover(
     store: &meet::FileMeetingStore,
+    dir: &Path,
     session: MeetingSessionState,
 ) -> Option<UnretainedMeetingAudio> {
     if session.retention.audio {
@@ -1352,31 +1472,98 @@ fn readable_session_leftover(
     if stale_recording && session_recorder_is_verified_running(&session) {
         return None;
     }
-    let (chunk_files, reason) = match session_chunk_count(store, &session) {
-        Ok(0) => return None,
-        Ok(count) if stale_recording => (
-            count,
-            "stale recording: retention.audio=false, chunk WAVs remain and the recorder is not verified running".to_string(),
-        ),
-        Ok(count) => (
-            count,
-            format!(
-                "retention.audio=false but chunk WAVs remain (status {})",
-                session.status.as_str()
-            ),
-        ),
-        Err(error) => (
+    let on_disk_chunks = dir.join("chunks");
+    let recorded = store.chunk_files(&session).map(|streams| {
+        streams
+            .into_iter()
+            .flat_map(|(_, paths)| paths)
+            .collect::<Vec<_>>()
+    });
+    let found = wav_paths(&on_disk_chunks, 2);
+    let (chunk_files, reason, unrecorded) = match (recorded, found) {
+        (Err(error), _) => (
             0,
             format!(
                 "unreadable chunks dir under {}: {error}",
                 session.chunks_dir
             ),
+            false,
         ),
+        (Ok(_), Err(error)) => (
+            0,
+            // `error` names the path it could not read.
+            format!("unreadable chunks dir: {error}"),
+            false,
+        ),
+        (Ok(recorded), Ok(found)) => {
+            let recorded_keys = recorded
+                .iter()
+                .map(|path| dedupe_key(path))
+                .collect::<std::collections::BTreeSet<_>>();
+            let unrecorded = found
+                .iter()
+                .filter(|path| !recorded_keys.contains(&dedupe_key(path)))
+                .count();
+            let count = recorded_keys.len() + unrecorded;
+            if count == 0 {
+                return None;
+            }
+            let reason = if unrecorded > 0 {
+                format!(
+                    "retention.audio=false and {unrecorded} chunk WAV(s) under {} are outside the chunks dir recorded in session.json ({}); was the data dir moved or restored? (status {})",
+                    on_disk_chunks.display(),
+                    session.chunks_dir,
+                    session.status.as_str()
+                )
+            } else if stale_recording {
+                "stale recording: retention.audio=false, chunk WAVs remain and the recorder is not verified running".to_string()
+            } else {
+                format!(
+                    "retention.audio=false but chunk WAVs remain (status {})",
+                    session.status.as_str()
+                )
+            };
+            (count, reason, unrecorded > 0)
+        }
     };
-    let remedy = if stale_recording {
-        format!("comlink meet stop {}", session.session_id)
+    let invalid_export = if stale_recording {
+        None
     } else {
-        format!("comlink meet finalize {}", session.session_id)
+        store
+            .validate_export_for_recovery(&session)
+            .err()
+            .and_then(|error| invalid_export_error(&session, &error))
+    };
+    let (reason, remedy) = if unrecorded {
+        (
+            reason,
+            format!(
+                "inspect {}; `comlink meet finalize` deletes only the recorded chunks dir {}, so remove WAVs outside it by hand",
+                on_disk_chunks.display(),
+                session.chunks_dir
+            ),
+        )
+    } else if stale_recording {
+        (reason, format!("comlink meet stop {}", session.session_id))
+    } else if let Some(ComlinkError::MeetingExportInvalid {
+        reason: invalid, ..
+    }) = invalid_export
+    {
+        (
+            format!(
+                "{reason}; the JSON export at {} is invalid ({invalid}), and `comlink meet finalize` never overwrites an existing export",
+                session.json_export_path
+            ),
+            format!(
+                "fix or remove the invalid export at {}, then run `comlink meet finalize {}`",
+                session.json_export_path, session.session_id
+            ),
+        )
+    } else {
+        (
+            reason,
+            format!("comlink meet finalize {}", session.session_id),
+        )
     };
     Some(UnretainedMeetingAudio {
         status: session.status.as_str(),
@@ -1389,6 +1576,12 @@ fn readable_session_leftover(
     })
 }
 
+/// Canonical form of a chunk path for de-duplication, or the path itself when
+/// it cannot be canonicalized.
+fn dedupe_key(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// A directory whose `session.json` is missing or unreadable: its retention
 /// policy is unknown, so any chunk WAV (or an unreadable chunks dir) is listed.
 fn unreadable_session_leftover(
@@ -1397,7 +1590,7 @@ fn unreadable_session_leftover(
     session_error: &ComlinkError,
 ) -> Option<UnretainedMeetingAudio> {
     let chunks_dir = dir.join("chunks");
-    let (chunk_files, reason) = match count_wavs(&chunks_dir, 2) {
+    let (chunk_files, reason) = match wav_paths(&chunks_dir, 2).map(|paths| paths.len()) {
         Ok(0) => return None,
         Ok(count) => (
             count,
@@ -1405,10 +1598,8 @@ fn unreadable_session_leftover(
         ),
         Err(error) => (
             0,
-            format!(
-                "unreadable session.json ({session_error}) and unreadable chunks dir {}: {error}",
-                chunks_dir.display()
-            ),
+            // `error` names the path it could not read.
+            format!("unreadable session.json ({session_error}) and unreadable chunks dir: {error}"),
         ),
     };
     Some(UnretainedMeetingAudio {
@@ -1425,27 +1616,33 @@ fn unreadable_session_leftover(
     })
 }
 
-/// Count `.wav` files in `dir` and its subdirectories down to `depth` levels
-/// (per-stream chunk dirs are one level down). A missing `dir` counts 0.
-fn count_wavs(dir: &Path, depth: usize) -> std::io::Result<usize> {
+/// `.wav` files in `dir` and its subdirectories down to `depth` levels
+/// (per-stream chunk dirs are one level down). Only a missing `dir` counts as
+/// empty; any other failure is returned with the path it concerns.
+fn wav_paths(dir: &Path, depth: usize) -> std::io::Result<Vec<PathBuf>> {
+    let with_path = |error: std::io::Error| {
+        std::io::Error::new(error.kind(), format!("{}: {error}", dir.display()))
+    };
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(error),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(with_path(error)),
     };
-    let mut count = 0;
+    let mut paths = Vec::new();
     for entry in entries {
-        let entry = entry?;
-        let kind = entry.file_type()?;
+        let entry = entry.map_err(with_path)?;
         let path = entry.path();
+        let kind = entry.file_type().map_err(|error| {
+            std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+        })?;
         if kind.is_dir() && depth > 0 {
-            count += count_wavs(&path, depth - 1)?;
+            paths.extend(wav_paths(&path, depth - 1)?);
         } else if kind.is_file() && path.extension().and_then(|value| value.to_str()) == Some("wav")
         {
-            count += 1;
+            paths.push(path);
         }
     }
-    Ok(count)
+    Ok(paths)
 }
 
 // ---------------------------------------------------------------------------
@@ -1864,5 +2061,23 @@ mod tests {
             None
         );
         assert_eq!(latest_completed_chunk(&[], &[]), None);
+    }
+
+    #[test]
+    fn session_dir_scan_names_the_entry_whose_type_cannot_be_read() {
+        let root = Path::new("/store");
+        let denied = || std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let entries = vec![
+            Ok((root.join("a"), Ok(true))),
+            Ok((root.join("file"), Ok(false))),
+            Ok((root.join("b"), Err(denied()))),
+            Err(denied()),
+        ];
+        let mut errors = Vec::new();
+        let dirs = collect_session_dirs(root, entries.into_iter(), &mut errors);
+        assert_eq!(dirs, vec![root.join("a")]);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(errors[0].path, "/store/b");
+        assert_eq!(errors[1].path, "/store");
     }
 }

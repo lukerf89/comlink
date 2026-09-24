@@ -182,7 +182,7 @@ cargo test --test meet_lifecycle --test meet_service   # 3 more runs, all green
 - **M2 (privacy): synchronous `meet stop` now uses the finalize ordering.** After ASR, sync stop writes the exports, deletes unretained chunks, then saves the final `stopped`. If the delete fails, it saves `failed` with the cleanup error (and `chunks_processed`) and returns `MeetingChunkCleanupFailed` (exit 1). `meet finalize <id>` then recovers from the export with no ASR, deletes the chunks, and commits `stopped`. The preliminary `stopped` save before ASR is unchanged, so an ASR failure still leaves `stopped` without exports. Successful stop stdout is unchanged (goldens byte-identical).
 - **M3a.** The `MeetingChunkCleanupFailed` reason is `could not delete <chunks_dir>: <io error>`.
 - **M3b.** On the finalizer launch-failure path, a failure to clear the active-session pointer is appended to `finalize.log` (with the original launch error) instead of being dropped.
-- **M3c (restriction).** On a `stopped` session, `meet finalize` falls through to ASR only when no JSON export exists at all. A JSON export that exists but fails validation (for example, a user-edited file) returns `MeetingExportUnavailable` (exit 1). The export, the chunks and the session state are left untouched, so the user's edit is never silently overwritten. `transcribing` and `failed` sessions are unchanged: an invalid export there is still rewritten from the chunks, because it can only come from an interrupted finalize.
+- **M3c (restriction).** On a `stopped` session, `meet finalize` falls through to ASR only when no JSON export exists at all. A JSON export that exists but fails validation (for example, a user-edited file) returns `MeetingExportUnavailable` (exit 1). The export, the chunks and the session state are left untouched, so the user's edit is never silently overwritten. ~~`transcribing` and `failed` sessions are unchanged: an invalid export there is still rewritten from the chunks, because it can only come from an interrupted finalize.~~ Corrected in the final round (N3): that claim stopped being true once M2 let a synchronous stop leave `failed` sessions with complete exports, and the JSON export is written atomically, so an interrupted finalize leaves it absent or complete, never invalid. The don't-overwrite rule now applies in every status.
 
 ### Tests added
 
@@ -229,6 +229,65 @@ cargo test --test meet_lifecycle --test meet_service   # 3 more runs, all green
 - A stale `recording` session with no chunk WAVs is not listed, because it holds no audio.
 - The M1, M2 and M3b tests make a directory unreadable or read-only, so they cannot fail as root. The suite is not run as root.
 - The audit also lists a session directory whose `session.json` has not been written yet but whose chunks exist (a `meet start` in the gap between creating the chunks dir and saving `session.json`). This is conservative, and in practice the chunks dir is empty at that point.
+
+## Final Round (LF-161 confirming-review findings N1-N5)
+
+### Changes
+
+- **N1 (privacy, gating): an unsearchable parent `chunks/` no longer reads as empty.** `chunk_paths_in_dir` used `is_dir()`, which returns `false` on `EACCES`. For the dual-stream layout (`chunks/<label>/`), a `chunks/` at mode `000` made every per-stream dir look empty, so the audit reported `clean=true` while WAVs remained. It now uses `fs::metadata`: `NotFound` (or not a directory) counts as empty, and any other error, including a failed `read_dir` entry or `file_type`, is returned with the path it concerns. The audit turns that into an `unreadable chunks dir under <chunks_dir>: <stream path>: Permission denied` entry (`clean=false`). The same swallow in `delete_unretained_chunks` (`exists()`) is also fixed: only `NotFound` is a no-op, so an uninspectable chunks dir fails the cleanup, and the session is not committed as `stopped`. `finalize`'s "does a JSON export exist?" check uses the same rule (`meet::path_may_exist`). Other `is_file()` checks on the finalize path decide only whether to rewrite an artifact, so a swallowed error there rewrites a file. It never deletes audio or hides it from the audit.
+- **N2 (privacy): moved or restored data dir.** The audit now also lists WAVs under `<session_dir>/chunks` as found on disk, two levels deep. It dedupes them against the recorded paths by canonical path. WAVs found only on disk are listed with a reason that says they are outside the recorded chunks dir. The remedy names the on-disk directory, because `meet finalize` deletes only the recorded chunks dir.
+- **N3: truthful remedy for an invalid export.** When a listed non-`recording` session's JSON export exists but does not validate, the audit's reason says the export is invalid and that finalize never overwrites an existing export. The remedy reads: fix or remove the invalid export at `<path>`, then run `comlink meet finalize <id>`. `meet finalize` returns a new `MeetingExportInvalid` error (exit 1, the existing general code) with the same instruction. For consistency, the don't-overwrite rule now also applies to `transcribing` and `failed` sessions that still have chunks. When no chunks remain, the existing `no recoverable export` error is kept, because there is nothing to rebuild the export from.
+- **N4: sync stop failures after ASR.** A `write_segments_jsonl` or `write_exports` failure now goes through `mark_failed` and `record_failed_state`, as the chunk-delete failure already did. The original error and its exit code are preserved, the session is `failed` rather than a preliminary `stopped` with `error=null`, and `meet finalize` retries. Sync stop also records `chunks_processed` on the preliminary snapshot before writing artifacts. If only the final `stopped` save fails, `meet finalize <id>` on that `stopped` session now repairs `session.json` (`segment_count`, `duration_ms`, `stopped_at_ms`) from the validated export. It keeps `chunks_processed` rather than returning success over the stale snapshot.
+- **N5.** A store entry whose `file_type()` fails is recorded in `scan_errors` against that entry's path. Only an entry that cannot be read at all, and so has no path, is recorded against the store root.
+
+Goldens are byte-identical, the stdout probe still reports 0 bytes, and no exit code changed. The schema change is additive (reason/remedy text and one new error variant). See `docs/output-contract.md`.
+
+### Tests added
+
+`tests/meet_service.rs`:
+- `dual_stream_audit_is_not_clean_when_the_parent_chunks_dir_is_unsearchable` (N1: dual-stream, retention off, `chunks/` at `000`; `chunk_files` errors naming the stream dir; audit `clean=false`, stream path named)
+- `chunk_cleanup_fails_instead_of_skipping_an_uninspectable_chunks_dir` (N1, cleanup path)
+- `meeting_audio_audit_counts_wavs_under_a_moved_session_dir` (N2, plus no double count in the normal layout)
+- `invalid_export_remedy_is_truthful_and_failed_sessions_never_overwrite_it` (N3, stopped and failed; following the remedy works)
+- `sync_stop_export_write_failure_is_failed_and_finalize_retries` (N4a)
+- `finalize_repairs_a_preliminary_stopped_snapshot_left_by_a_failed_final_save` (N4b)
+- `finalize_never_overwrites_an_invalid_export_on_a_stopped_session` now asserts `MeetingExportInvalid` and the instruction text.
+
+`src/meet_service.rs` unit test: `session_dir_scan_names_the_entry_whose_type_cannot_be_read` (N5). `src/error.rs`: `MeetingExportInvalid` exits 1.
+
+### Mutation checks (fix reverted, test red, restored, green)
+
+| Reverted | Failing test |
+|---|---|
+| N1: `chunk_paths_in_dir` treats any metadata error as empty (the old `is_dir()` behaviour) | `dual_stream_audit_is_not_clean_when_the_parent_chunks_dir_is_unsearchable`, at the store assertion. With that assertion removed, the audit assertion also fails, because the reason no longer names the stream dir. The N2 on-disk scan still keeps `clean=false` then, as defence in depth. |
+| N1: `delete_unretained_chunks` treats a metadata error as "nothing to delete" | `chunk_cleanup_fails_instead_of_skipping_an_uninspectable_chunks_dir` |
+| N2: on-disk `<session_dir>/chunks` scan removed | `meeting_audio_audit_counts_wavs_under_a_moved_session_dir` |
+| N3: audit ignores the invalid export (old remedy) | `invalid_export_remedy_is_truthful_and_failed_sessions_never_overwrite_it` |
+| N3: `failed` sessions overwrite an invalid export again | `invalid_export_remedy_is_truthful_and_failed_sessions_never_overwrite_it` |
+| N4: export writes return through `?` again | `sync_stop_export_write_failure_is_failed_and_finalize_retries` |
+| N4: stopped fast path skips the repair | `finalize_repairs_a_preliminary_stopped_snapshot_left_by_a_failed_final_save` |
+| N5: entry type error recorded against the root | `session_dir_scan_names_the_entry_whose_type_cannot_be_read` |
+
+### Commands and results
+
+```bash
+cargo fmt --check                              # ok
+cargo clippy --all-targets -- -D warnings      # ok
+cargo test --all                               # ok (lib 102, meet_lifecycle 16, meet_service 36, stdout probe 0 bytes)
+cargo run -- doctor                            # ok
+cargo run -- meet status --format json         # status none
+bash scripts/e2e/phase-10a-meet-service.sh     # passed (artifacts refreshed)
+cargo test --test meet_lifecycle --test meet_service   # about 40 full runs: 1 failure, then green on every rerun
+```
+
+Flake note: in one of about 40 full `meet_lifecycle` + `meet_service` runs (the second of the first three), the pre-existing `finalize_reports_busy_while_another_process_holds_the_lock` failed once while other agents were loading the machine. The panic message was not captured. It did not recur in 12 isolated runs of that test, or in 33 further full-suite runs (including the final 3). That test spawns a real `comlink meet finalize` subprocess with a 1 s lock wait, so treat it as load-sensitive until it is reproduced.
+
+### New known limitations
+
+- N4b is tested by writing the preliminary snapshot back to `session.json` directly. Making only the final save fail, after a chunk delete in the same directory has succeeded, needs a fault-injection hook. The early `chunks_processed` save has no direct test for the same reason.
+- `meet finalize` still deletes only the recorded chunks dir. After a data-dir move, the audit reports the on-disk WAVs (N2), but they are removed by hand.
+- `meet status` on a session whose chunks dir cannot be inspected now fails with an error naming the path, where before a non-searchable parent read as `chunk_count: 0`. A missing session still reports `none`.
+- The N1 tests use `chmod 000`, so they cannot fail as root. The suite is not run as root.
 
 ## Manual Test Instructions (pause gate)
 
