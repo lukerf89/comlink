@@ -22,7 +22,8 @@ struct SessionTests {
         suite.testNoSpeechAndInsertionFailureHaveDifferentRetention()
         suite.testResetInvalidatesPendingWorkAndInvalidTransitionsDoNothing()
         suite.testPaletteFilteringAndKeyboardWrapIncludingEmptyResults()
-        print("PASS: 6 prototype state and keyboard checks")
+        suite.testCopiedStatusFollowsTheCopiedVariantOnly()
+        print("PASS: 7 prototype state and keyboard checks")
     }
     func testPrimaryFlowPreservesOriginalAndMode() {
         var session = Session()
@@ -104,5 +105,24 @@ struct SessionTests {
         expectEqual(PaletteAction.move(0, by: -1, count: 5), 4)
         expectEqual(PaletteAction.move(4, by: 1, count: 5), 0)
         expectEqual(PaletteAction.move(0, by: 1, count: 0), 0)
+    }
+
+    func testCopiedStatusFollowsTheCopiedVariantOnly() {
+        // Regression: copying Cleaned then switching to Original must not claim
+        // Original is on the clipboard.
+        var status = CopyStatus()
+        expectFalse(status.isCopied(original: false))
+        status.record(original: false, succeeded: true)
+        expectTrue(status.isCopied(original: false))
+        expectFalse(status.isCopied(original: true))
+        status.record(original: true, succeeded: true)
+        expectTrue(status.isCopied(original: true))
+        expectFalse(status.isCopied(original: false))
+        status.record(original: true, succeeded: false)
+        expectTrue(status.failed)
+        expectFalse(status.isCopied(original: true))
+        expectFalse(status.isCopied(original: false))
+        status.record(original: false, succeeded: true)
+        expectFalse(status.failed)
     }
 }

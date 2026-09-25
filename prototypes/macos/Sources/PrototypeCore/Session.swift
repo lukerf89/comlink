@@ -81,6 +81,21 @@ public struct Session {
     }
 }
 
+/// Remembers which transcript variant Copy put on the clipboard, so switching
+/// between Original and Cleaned never shows "Copied" beside the other text.
+public struct CopyStatus: Equatable {
+    public private(set) var copiedOriginal: Bool?
+    public private(set) var failed = false
+    public init() {}
+
+    public mutating func record(original: Bool, succeeded: Bool) {
+        copiedOriginal = succeeded ? original : nil
+        failed = !succeeded
+    }
+
+    public func isCopied(original: Bool) -> Bool { copiedOriginal == original }
+}
+
 public enum PaletteAction: String, CaseIterable {
     case dictate = "Start dictation"
     case file = "Transcribe audio…"

@@ -63,3 +63,8 @@ The startup smoke test reads the app's preview preferences but does not write th
 8. Confirm no real capture, insertion, submission or system-shortcut reconfiguration occurs in this preview. Approve the native hardware behavior before connecting the gesture controller to actual recording.
 
 Pass: physical gestures match the requested semantics, lock state remains obvious, release/stop/cancel never resurrects a session, preferences persist, and scope/permission limitations are explicit. Record failures with key, keyboard model, timing, scope and current macOS Fn assignment; fix within this issue before production integration.
+
+## Review fixes (2026-09-24)
+
+- **Stale "Copied" badge.** Copying Cleaned and then switching to Original (or the reverse) still showed "Copied", even though the text on screen was not on the clipboard. The model now records which variant was copied (`CopyStatus` in `PrototypeCore`), and the badge appears only beside that variant. Regression check: `testCopiedStatusFollowsTheCopiedVariantOnly`.
+- **Build failure on Command Line Tools–only Macs.** With Swift 6.4 and the macOS 27 SDK, SwiftUI's `@State` is a macro whose plugin (`SwiftUIMacros`) does not ship with Command Line Tools. Both `scripts/dev/preview-macos.sh` and the E2E failed to compile `PaletteView`. The palette's per-open state now uses a `@StateObject`. Re-ran `scripts/e2e/lf-163-macos-prototype.sh`: it passed with 7 session and 8 hotkey check groups. The cargo gate passed.

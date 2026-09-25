@@ -109,8 +109,7 @@ final class PreviewModel: ObservableObject {
     @Published var paletteEscape = 0
     @Published var scenario: Scenario = .success
     @Published var mode: WorkMode = .clean
-    @Published var copied = false
-    @Published var copyError = false
+    @Published var copyStatus = CopyStatus()
     @Published var showOriginal = false
     @Published var startedAt = Date()
     var render: () -> Void = {}
@@ -122,8 +121,7 @@ final class PreviewModel: ObservableObject {
 
     private func start(preservingGesture: Bool) {
         if !preservingGesture { clearGesture() }
-        copied = false
-        copyError = false
+        copyStatus = CopyStatus()
         showOriginal = false
         startedAt = Date()
         session.start(scenario: scenario, mode: mode)
@@ -151,8 +149,8 @@ final class PreviewModel: ObservableObject {
     func retry() { scenario = .success; start() }
     func copy() {
         guard session.hasTranscript else { return }
-        copied = ClipboardAdapter().copy(showOriginal ? session.original : session.cleaned)
-        copyError = !copied
+        let succeeded = ClipboardAdapter().copy(showOriginal ? session.original : session.cleaned)
+        copyStatus.record(original: showOriginal, succeeded: succeeded)
     }
 
     var stageName: String {

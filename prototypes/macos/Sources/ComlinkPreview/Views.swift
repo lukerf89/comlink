@@ -135,9 +135,9 @@ struct TranscriptView: View {
             HStack {
                 Text("\(model.session.mode.rawValue) · Sample transcript").font(.caption).foregroundStyle(.secondary)
                 Spacer()
-                if model.copied { Label("Copied", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary) }
+                if model.copyStatus.isCopied(original: model.showOriginal) { Label("Copied", systemImage: "checkmark").font(.caption).foregroundStyle(.secondary) }
             }
-            if model.copyError { Text("Copy failed. Select the text above and copy manually.").font(.caption).foregroundStyle(.red) }
+            if model.copyStatus.failed { Text("Copy failed. Select the text above and copy manually.").font(.caption).foregroundStyle(.red) }
             HStack {
                 Button("Copy", action: model.copy).keyboardShortcut("c", modifiers: .command)
                     .buttonStyle(.borderedProminent)
@@ -198,12 +198,28 @@ struct ResultView: View {
     }
 }
 
+/// Per-open palette state. An ObservableObject rather than `@State`, whose macro
+/// plugin is missing from Command Line Tools–only Swift toolchains.
+@MainActor
+final class PaletteState: ObservableObject {
+    @Published var query = ""
+    @Published var selection = 0
+    @Published var detail: PaletteAction?
+}
+
 struct PaletteView: View {
     @ObservedObject var model: PreviewModel
-    @State private var query = ""
-    @State private var selection = 0
-    @State private var detail: PaletteAction?
+    @StateObject private var state = PaletteState()
     @FocusState private var searchFocused: Bool
+    private var query: String { state.query }
+    private var selection: Int {
+        get { state.selection }
+        nonmutating set { state.selection = newValue }
+    }
+    private var detail: PaletteAction? {
+        get { state.detail }
+        nonmutating set { state.detail = newValue }
+    }
     private var actions: [PaletteAction] { PaletteAction.matching(query) }
 
     var body: some View {
@@ -225,7 +241,7 @@ struct PaletteView: View {
                 } else {
                     HStack(spacing: 12) {
                         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                        TextField("What would you like to do?", text: $query)
+                        TextField("What would you like to do?", text: $state.query)
                             .textFieldStyle(.plain).font(.system(size: 17)).focused($searchFocused)
                             .accessibilityLabel("Search commands")
                             .onSubmit { activateSelected() }
